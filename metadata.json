@@ -1,0 +1,6 @@
+{
+  "name": "SUPER SURPRISE BOX",
+  "description": "Exclusive customer-facing surprise box opening platform for verified WhatsApp participants with iPhone 17 Pro prizes.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
