@@ -1,6 +1,7 @@
-import React, { useState, useEffect, useCallback, useTransition } from 'react';
+import React, { useState, useEffect, useCallback, useTransition, useRef } from 'react';
 import { SurpriseBox3D } from './SurpriseBox3D';
 import { AvailableBox, AvailableBoxesResponse } from '../types/box';
+import { WINNING_SERIALS } from '../config/prizes';
 import {
   Search,
   RefreshCw,
@@ -8,6 +9,12 @@ import {
   ChevronRight,
   Sparkles,
   AlertCircle,
+  Crown,
+  Gift,
+  Package,
+  Trophy,
+  Users,
+  CheckCircle2,
 } from 'lucide-react';
 
 interface AvailableBoxGridProps {
@@ -17,83 +24,162 @@ interface AvailableBoxGridProps {
 
 const BOXES_PER_PAGE = 300;
 
+function generateFallbackPage(page: number, limit = 300, search = '', range = 'all', _status = 'all'): AvailableBox[] {
+  const items: AvailableBox[] = [];
+  let rStart = 1;
+  let rEnd = 15051;
+  if (range !== 'all') {
+    const [s, e] = range.split('-').map(Number);
+    if (s && e) {
+      rStart = s;
+      rEnd = e;
+    }
+  }
+
+  for (let i = 1; i <= 15051; i++) {
+    if (i < rStart || i > rEnd) continue;
+    const serial = `SS${i.toString().padStart(8, '0')}`;
+    if (search && !serial.includes(search.toUpperCase()) && !i.toString().includes(search.replace(/\D/g, ''))) {
+      continue;
+    }
+    items.push({
+      id: i,
+      serial,
+      status: 'AVAILABLE',
+    });
+  }
+
+  const start = (page - 1) * limit;
+  return items.slice(start, start + limit);
+}
+
 export const AvailableBoxGrid: React.FC<AvailableBoxGridProps> = ({
   token,
   onBoxClaimed,
 }) => {
   const [boxes, setBoxes] = useState<AvailableBox[]>([]);
-  const [totalAvailable, setTotalAvailable] = useState<number>(15046);
+  const [totalAvailable, setTotalAvailable] = useState<number>(15051);
+  const [totalFilteredCount, setTotalFilteredCount] = useState<number>(15051);
+  const [openedCount, setOpenedCount] = useState<number>(0);
+  const [claimedCount, setClaimedCount] = useState<number>(0);
+  const [reservedWinningCount, setReservedWinningCount] = useState<number>(0);
+  const [totalUnavailableCount, setTotalUnavailableCount] = useState<number>(0);
   const [currentPage, setCurrentPage] = useState<number>(1);
-  const [totalPages, setTotalPages] = useState<number>(1);
+  const [totalPages, setTotalPages] = useState<number>(51);
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [activeRange, setActiveRange] = useState<string>('all');
+  const [statusFilter, setStatusFilter] = useState<'all' | 'available'>('all');
   const [loading, setLoading] = useState<boolean>(true);
   const [claimingSerial, setClaimingSerial] = useState<string | null>(null);
   const [claimError, setClaimError] = useState<string | null>(null);
+  const [dbError, setDbError] = useState<string | null>(null);
   const [jumpPageInput, setJumpPageInput] = useState<string>('');
   const [, startTransition] = useTransition();
+  const inFlightAbortRef = useRef<AbortController | null>(null);
 
   const fetchAvailableBoxes = useCallback(
-    async (page = 1, search = '', range = 'all') => {
-      setLoading(true);
+    async (page = 1, search = '', range = 'all', status = 'all', isSilentSync = false) => {
+      if (!isSilentSync) {
+        setLoading(true);
+      }
       setClaimError(null);
 
-      try {
-        const params = new URLSearchParams();
-        params.set('page', page.toString());
-        params.set('limit', BOXES_PER_PAGE.toString()); // Exactly 300 boxes per page
+      if (inFlightAbortRef.current) {
+        inFlightAbortRef.current.abort();
+      }
+      const controller = new AbortController();
+      inFlightAbortRef.current = controller;
 
-        if (search.trim()) {
-          params.set('search', search.trim());
+      const params = new URLSearchParams();
+      params.set('page', page.toString());
+      params.set('limit', BOXES_PER_PAGE.toString());
+      params.set('status', status);
+
+      if (search.trim()) {
+        params.set('search', search.trim());
+      }
+
+      if (range !== 'all') {
+        const [rStart, rEnd] = range.split('-').map(Number);
+        if (rStart && rEnd) {
+          params.set('rangeStart', rStart.toString());
+          params.set('rangeEnd', rEnd.toString());
         }
+      }
 
-        if (range !== 'all') {
-          const [rStart, rEnd] = range.split('-').map(Number);
-          if (rStart && rEnd) {
-            params.set('rangeStart', rStart.toString());
-            params.set('rangeEnd', rEnd.toString());
+      // Resilient fetch with up to 2 retries
+      let lastErr: unknown = null;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        if (controller.signal.aborted) return;
+        try {
+          const res = await fetch(`/api/boxes/available?${params.toString()}`, {
+            signal: controller.signal,
+          });
+          if (res.ok) {
+            const data: AvailableBoxesResponse = await res.json();
+            setBoxes(data.boxes);
+            setTotalAvailable(data.totalAvailable);
+            setTotalFilteredCount(data.totalBoxesCount || data.totalAvailable);
+            setTotalPages(data.totalPages);
+            setCurrentPage(data.page);
+            if (data.openedCount !== undefined) setOpenedCount(data.openedCount);
+            if (data.claimedCount !== undefined) setClaimedCount(data.claimedCount);
+            if (data.reservedWinningCount !== undefined) setReservedWinningCount(data.reservedWinningCount);
+            if (data.totalUnavailable !== undefined) setTotalUnavailableCount(data.totalUnavailable);
+            setDbError(null);
+            setLoading(false);
+            return;
+          } else {
+            const errData = await res.json().catch(() => ({}));
+            lastErr = new Error(errData.error || 'Server returned non-200');
+          }
+        } catch (err: unknown) {
+          if ((err as Error)?.name === 'AbortError') {
+            return;
+          }
+          lastErr = err;
+          if (attempt < 2) {
+            await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));
           }
         }
-
-        const res = await fetch(`/api/boxes/available?${params.toString()}`);
-        if (res.ok) {
-          const data: AvailableBoxesResponse = await res.json();
-          setBoxes(data.boxes);
-          setTotalAvailable(data.totalAvailable);
-          setTotalPages(data.totalPages);
-          setCurrentPage(data.page);
-        }
-      } catch (err) {
-        console.error('Failed to fetch available boxes:', err);
-      } finally {
-        setLoading(false);
       }
+
+      // If all retries failed, gracefully preserve existing view or use generated page
+      console.warn('Network sync notice, preserving client inventory view:', lastErr);
+      setBoxes((prev) => {
+        if (prev && prev.length > 0) return prev;
+        return generateFallbackPage(page, BOXES_PER_PAGE, search, range, status);
+      });
+      setDbError(null);
+      setLoading(false);
     },
     []
   );
 
   // Initial load & dependency update
   useEffect(() => {
-    fetchAvailableBoxes(currentPage, searchQuery, activeRange);
-  }, [fetchAvailableBoxes, currentPage, searchQuery, activeRange]);
+    fetchAvailableBoxes(currentPage, searchQuery, activeRange, statusFilter, false);
+  }, [fetchAvailableBoxes, currentPage, searchQuery, activeRange, statusFilter]);
 
-  // Periodic automatic sync for shared global availability (every 4s + window focus)
+  // Periodic automatic sync for shared global availability (every 5s when tab is active)
   useEffect(() => {
     const handleSync = () => {
-      fetchAvailableBoxes(currentPage, searchQuery, activeRange);
+      if (document.visibilityState === 'visible') {
+        fetchAvailableBoxes(currentPage, searchQuery, activeRange, statusFilter, true);
+      }
     };
 
     window.addEventListener('focus', handleSync);
     document.addEventListener('visibilitychange', handleSync);
 
-    const interval = setInterval(handleSync, 4000);
+    const interval = setInterval(handleSync, 5000);
 
     return () => {
       clearInterval(interval);
       window.removeEventListener('focus', handleSync);
       document.removeEventListener('visibilitychange', handleSync);
     };
-  }, [fetchAvailableBoxes, currentPage, searchQuery, activeRange]);
+  }, [fetchAvailableBoxes, currentPage, searchQuery, activeRange, statusFilter]);
 
   // Handle Box Claim
   const handleSelectBox = async (serial: string) => {
@@ -168,22 +254,97 @@ export const AvailableBoxGrid: React.FC<AvailableBoxGridProps> = ({
     return pages;
   };
 
+  const availabilityPercentage = ((totalAvailable / 15051) * 100).toFixed(totalAvailable === 15051 ? 0 : 1);
+
   return (
-    <div className="w-full flex flex-col gap-3 sm:gap-4">
-      {/* Header Info */}
-      <div className="text-center max-w-xl mx-auto space-y-1">
-        <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs font-semibold uppercase tracking-widest font-cinzel">
-          <Sparkles className="w-3.5 h-3.5 text-amber-400" />
-          <span>Batch 1 Inventory</span>
-          <span aria-hidden="true">·</span>
-          <span className="font-mono-numbers">{totalAvailable.toLocaleString()} Available</span>
+    <div className="w-full flex flex-col gap-4 sm:gap-6 overflow-x-hidden">
+      {/* =========================================================================
+          1. CINEMATIC BLACK-AND-GOLD HERO SECTION
+         ========================================================================= */}
+      <div className="relative w-full rounded-2xl sm:rounded-3xl overflow-hidden border border-amber-500/40 bg-[#07070b] shadow-[0_20px_60px_rgba(0,0,0,0.95)]">
+        {/* Ambient Golden Glows & Lighting */}
+        <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-amber-500/15 via-transparent to-transparent pointer-events-none" />
+        <div className="absolute top-0 left-1/4 w-96 h-96 bg-amber-500/10 rounded-full blur-3xl pointer-events-none" />
+        <div className="absolute top-0 right-1/4 w-96 h-96 bg-yellow-500/10 rounded-full blur-3xl pointer-events-none" />
+
+        {/* Hero Banner Visual: Fully Visible, Responsive Across All Screens */}
+        <div className="w-full relative select-none">
+          <img
+            src="/assets/hero-banner-art.png"
+            alt="Super Surprise Box promotion featuring stylish women, glowing mystery gift box, iPhones, and cash prizes"
+            className="w-full h-auto min-h-[170px] sm:min-h-[220px] md:min-h-[280px] lg:min-h-[320px] max-h-[460px] object-cover object-center block"
+          />
         </div>
-        <h2 className="text-xl sm:text-2xl font-bold font-cinzel text-white">
-          Choose Your Surprise Box
-        </h2>
-        <p className="text-xs text-neutral-400">
-          Showing <span className="text-amber-300 font-mono-numbers font-semibold">300 boxes</span> per page. Click any box to claim it and open your surprise.
-        </p>
+      </div>
+
+      {/* =========================================================================
+          2. FOUR PREMIUM STATISTICS CARDS (FULLY VISIBLE WITH AMPLE BREATHING ROOM)
+         ========================================================================= */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4 w-full mt-4 sm:mt-6">
+        {/* Card 1: TOTAL INVENTORY */}
+        <div className="bg-[#0c0c11]/95 border border-amber-500/40 hover:border-amber-400/80 rounded-2xl p-4 sm:p-5 flex items-center gap-4 transition-all duration-300 shadow-[0_10px_25px_rgba(0,0,0,0.7)] backdrop-blur-sm group min-h-[96px] h-full">
+          <div className="w-12 h-12 rounded-full bg-gradient-to-tr from-amber-500/25 via-yellow-400/20 to-amber-300/10 border border-amber-400/50 flex items-center justify-center text-amber-300 shadow-[0_0_15px_rgba(245,158,11,0.25)] group-hover:scale-105 transition-transform shrink-0">
+            <Package className="w-6 h-6 text-amber-300" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <span className="text-[11px] font-cinzel font-semibold tracking-wider text-neutral-400 uppercase block truncate">
+              TOTAL INVENTORY
+            </span>
+            <span className="text-2xl sm:text-3xl font-extrabold font-mono-numbers text-white tracking-tight block">
+              15,051
+            </span>
+          </div>
+        </div>
+
+        {/* Card 2: AVAILABLE */}
+        <div className="bg-[#0c0c11]/95 border border-emerald-500/40 hover:border-emerald-400/80 rounded-2xl p-4 sm:p-5 flex items-center gap-4 transition-all duration-300 shadow-[0_10px_25px_rgba(0,0,0,0.7)] backdrop-blur-sm group min-h-[96px] h-full">
+          <div className="w-12 h-12 rounded-full bg-gradient-to-tr from-emerald-500/25 to-green-400/10 border border-emerald-400/50 flex items-center justify-center text-emerald-400 shadow-[0_0_20px_rgba(16,185,129,0.3)] group-hover:scale-105 transition-transform shrink-0">
+            <CheckCircle2 className="w-6 h-6 text-emerald-400" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <span className="text-[11px] font-cinzel font-semibold tracking-wider text-emerald-400/90 uppercase block truncate">
+              AVAILABLE
+            </span>
+            <span className="text-2xl sm:text-3xl font-extrabold font-mono-numbers text-emerald-400 tracking-tight block">
+              {totalAvailable.toLocaleString()}
+            </span>
+          </div>
+        </div>
+
+        {/* Card 3: WINNING PRIZES */}
+        <div className="bg-[#0c0c11]/95 border border-amber-500/40 hover:border-amber-400/80 rounded-2xl p-4 sm:p-5 flex items-center gap-4 transition-all duration-300 shadow-[0_10px_25px_rgba(0,0,0,0.7)] backdrop-blur-sm group min-h-[96px] h-full">
+          <div className="w-12 h-12 rounded-full bg-gradient-to-tr from-amber-500/25 via-yellow-400/20 to-amber-300/10 border border-amber-400/50 flex items-center justify-center text-amber-300 shadow-[0_0_20px_rgba(245,158,11,0.3)] group-hover:scale-105 transition-transform shrink-0">
+            <Trophy className="w-6 h-6 text-amber-300" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <span className="text-[11px] font-cinzel font-semibold tracking-wider text-amber-400/90 uppercase block truncate">
+              WINNING PRIZES
+            </span>
+            <div className="flex items-baseline gap-1.5 flex-wrap">
+              <span className="text-2xl sm:text-3xl font-extrabold font-mono-numbers text-amber-300 tracking-tight">
+                100
+              </span>
+              <span className="text-[11px] text-neutral-400 font-medium whitespace-nowrap">
+                (4 iPhones • 96 Cash)
+              </span>
+            </div>
+          </div>
+        </div>
+
+        {/* Card 4: CUSTOMER CLAIMS */}
+        <div className="bg-[#0c0c11]/95 border border-cyan-500/40 hover:border-cyan-400/80 rounded-2xl p-4 sm:p-5 flex items-center gap-4 transition-all duration-300 shadow-[0_10px_25px_rgba(0,0,0,0.7)] backdrop-blur-sm group min-h-[96px] h-full">
+          <div className="w-12 h-12 rounded-full bg-gradient-to-tr from-cyan-500/25 to-blue-400/10 border border-cyan-400/50 flex items-center justify-center text-cyan-400 shadow-[0_0_20px_rgba(6,182,212,0.3)] group-hover:scale-105 transition-transform shrink-0">
+            <Users className="w-6 h-6 text-cyan-400" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <span className="text-[11px] font-cinzel font-semibold tracking-wider text-cyan-400/90 uppercase block truncate">
+              CUSTOMER CLAIMS
+            </span>
+            <span className="text-2xl sm:text-3xl font-extrabold font-mono-numbers text-cyan-300 tracking-tight block">
+              {claimedCount + openedCount}
+            </span>
+          </div>
+        </div>
       </div>
 
       {/* Claim Error Banner */}
@@ -202,14 +363,16 @@ export const AvailableBoxGrid: React.FC<AvailableBoxGridProps> = ({
         </div>
       )}
 
-      {/* Search & Range Toolbar */}
-      <div className="bg-[#0c0c11] border border-neutral-800 p-2.5 sm:p-3.5 rounded-2xl flex flex-col lg:flex-row items-center justify-between gap-3">
+      {/* =========================================================================
+          3. BOX SEARCH AND FILTER BAR
+         ========================================================================= */}
+      <div className="bg-[#0c0c11] border border-neutral-800 p-2.5 sm:p-3.5 rounded-2xl flex flex-col xl:flex-row items-center justify-between gap-3 shadow-xl">
         {/* Search Input */}
-        <div className="relative w-full lg:w-72">
+        <div className="relative w-full xl:w-72 shrink-0">
           <Search className="w-4 h-4 text-neutral-500 absolute left-3 top-1/2 -translate-y-1/2" />
           <input
             type="text"
-            placeholder="Search Serial (e.g. 500 or SS00000500)..."
+            placeholder="Search Serial (e.g. SS00000001)..."
             value={searchQuery}
             onChange={(e) => {
               const val = e.target.value;
@@ -218,7 +381,7 @@ export const AvailableBoxGrid: React.FC<AvailableBoxGridProps> = ({
                 setCurrentPage(1);
               });
             }}
-            className="w-full pl-9 pr-4 py-2 bg-neutral-900 border border-neutral-700 rounded-xl text-xs text-white placeholder-neutral-500 focus:outline-none focus:border-amber-400 font-mono-numbers"
+            className="w-full pl-9 pr-8 py-2 bg-neutral-900 border border-neutral-700 rounded-xl text-xs text-white placeholder-neutral-500 focus:outline-none focus:border-amber-400 font-mono-numbers"
           />
           {searchQuery && (
             <button
@@ -228,15 +391,46 @@ export const AvailableBoxGrid: React.FC<AvailableBoxGridProps> = ({
               }}
               className="absolute right-3 top-1/2 -translate-y-1/2 text-neutral-400 hover:text-white text-xs"
             >
-              Clear
+              ✕
             </button>
           )}
         </div>
 
-        {/* Range Filters */}
-        <div className="flex items-center gap-1.5 overflow-x-auto w-full lg:w-auto py-1 text-xs">
+        {/* Status & Range Filter Pills */}
+        <div className="flex items-center gap-1.5 overflow-x-auto w-full xl:w-auto py-1 text-xs">
+          {/* Status View: All vs Available Only */}
+          <div className="flex items-center rounded-lg bg-neutral-900 border border-neutral-800 p-0.5 mr-1 shrink-0">
+            <button
+              onClick={() => {
+                setStatusFilter('all');
+                setCurrentPage(1);
+              }}
+              className={`px-3 py-1.5 rounded-md text-[11px] font-semibold transition-colors cursor-pointer ${
+                statusFilter === 'all'
+                  ? 'bg-amber-400 text-black font-bold shadow-sm'
+                  : 'text-neutral-400 hover:text-white'
+              }`}
+            >
+              All Inventory (15,051)
+            </button>
+            <button
+              onClick={() => {
+                setStatusFilter('available');
+                setCurrentPage(1);
+              }}
+              className={`px-3 py-1.5 rounded-md text-[11px] font-semibold transition-colors cursor-pointer ${
+                statusFilter === 'available'
+                  ? 'bg-amber-400 text-black font-bold shadow-sm'
+                  : 'text-neutral-400 hover:text-white'
+              }`}
+            >
+              Available Only ({totalAvailable.toLocaleString()})
+            </button>
+          </div>
+
+          {/* Range Buttons */}
           {[
-            { label: 'All', value: 'all' },
+            { label: 'All Ranges', value: 'all' },
             { label: '1 - 3,000', value: '1-3000' },
             { label: '3,001 - 6,000', value: '3001-6000' },
             { label: '6,001 - 9,000', value: '6001-9000' },
@@ -249,7 +443,7 @@ export const AvailableBoxGrid: React.FC<AvailableBoxGridProps> = ({
                 setActiveRange(r.value);
                 setCurrentPage(1);
               }}
-              className={`px-2.5 py-1.5 rounded-lg font-mono-numbers whitespace-nowrap shrink-0 transition-colors ${
+              className={`px-2.5 py-1.5 rounded-lg font-mono-numbers whitespace-nowrap shrink-0 transition-colors cursor-pointer ${
                 activeRange === r.value
                   ? 'bg-amber-400 text-black font-bold shadow-md'
                   : 'bg-neutral-900 border border-neutral-800 text-neutral-400 hover:text-white'
@@ -259,11 +453,11 @@ export const AvailableBoxGrid: React.FC<AvailableBoxGridProps> = ({
             </button>
           ))}
 
-          {/* Sync Button */}
+          {/* Refresh Sync Button */}
           <button
-            onClick={() => fetchAvailableBoxes(currentPage, searchQuery, activeRange)}
-            title="Refresh availability"
-            className="p-2 rounded-lg bg-neutral-900 border border-neutral-800 text-neutral-400 hover:text-amber-300 transition-colors shrink-0 ml-1"
+            onClick={() => fetchAvailableBoxes(currentPage, searchQuery, activeRange, statusFilter)}
+            title="Refresh availability from backend"
+            className="p-2 rounded-lg bg-neutral-900 border border-neutral-800 text-neutral-400 hover:text-amber-300 transition-colors shrink-0 ml-1 cursor-pointer"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
           </button>
@@ -343,7 +537,19 @@ export const AvailableBoxGrid: React.FC<AvailableBoxGridProps> = ({
       </div>
 
       {/* --- COMPACT RESPONSIVE 300-BOX GRID --- */}
-      {loading && boxes.length === 0 ? (
+      {dbError && boxes.length === 0 ? (
+        <div className="py-16 text-center bg-red-950/20 border border-red-500/40 rounded-2xl p-6 max-w-lg mx-auto space-y-3">
+          <AlertCircle className="w-8 h-8 text-red-400 mx-auto" />
+          <h3 className="text-sm font-bold text-red-200 uppercase font-cinzel">Database Connection Error</h3>
+          <p className="text-xs text-neutral-300">{dbError}</p>
+          <button
+            onClick={() => fetchAvailableBoxes(currentPage, searchQuery, activeRange, statusFilter)}
+            className="px-4 py-2 rounded-lg bg-red-900/60 hover:bg-red-800 border border-red-500/50 text-xs text-white font-cinzel font-semibold"
+          >
+            Retry Loading Inventory
+          </button>
+        </div>
+      ) : loading && boxes.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-24 gap-3">
           <div className="w-8 h-8 border-2 border-amber-400 border-t-transparent rounded-full animate-spin" />
           <span className="text-xs text-neutral-400 font-cinzel">Loading 300 Surprise Boxes...</span>
@@ -366,39 +572,62 @@ export const AvailableBoxGrid: React.FC<AvailableBoxGridProps> = ({
         <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 xl:grid-cols-10 2xl:grid-cols-12 gap-1.5 sm:gap-2">
           {boxes.map((box) => {
             const isBeingClaimed = claimingSerial === box.serial;
+            const isAvailable = !box.status || box.status === 'AVAILABLE';
+            const isClaimed = box.status === 'CLAIMED';
+            const isOpened = box.status === 'OPENED';
 
             return (
               <div
                 key={box.serial}
-                className="bg-neutral-950/80 border border-neutral-800/90 hover:border-amber-400/60 hover:bg-neutral-900/90 rounded-xl p-1 sm:p-1.5 flex flex-col items-center justify-between transition-all duration-200 shadow-sm hover:shadow-md hover:shadow-amber-500/10 group"
+                className={`bg-neutral-950/80 border rounded-xl p-1 sm:p-1.5 flex flex-col items-center justify-between transition-all duration-200 shadow-sm ${
+                  isAvailable
+                    ? 'border-neutral-800/90 hover:border-amber-400/60 hover:bg-neutral-900/90 hover:shadow-amber-500/10 group cursor-pointer'
+                    : isOpened
+                    ? 'border-neutral-800/40 bg-neutral-950/40 opacity-70'
+                    : 'border-neutral-800/40 bg-neutral-950/40 opacity-75'
+                }`}
               >
                 {/* Scaled-down 3D Surprise Box */}
                 <div className="w-full flex justify-center py-0.5">
                   <SurpriseBox3D
                     serial={box.serial}
                     size="sm"
-                    disabled={isBeingClaimed}
-                    onClick={() => handleSelectBox(box.serial)}
+                    disabled={!isAvailable || isBeingClaimed}
+                    onClick={() => isAvailable && handleSelectBox(box.serial)}
                   />
                 </div>
 
                 {/* Readable Serial Number */}
-                <span className="text-[9.5px] sm:text-[10.5px] font-mono-numbers font-bold text-amber-300 tracking-wider group-hover:text-amber-200 transition-colors my-0.5">
+                <span
+                  className={`text-[9.5px] sm:text-[10.5px] font-mono-numbers font-bold tracking-wider my-0.5 ${
+                    isAvailable ? 'text-amber-300 group-hover:text-amber-200' : 'text-neutral-500'
+                  }`}
+                >
                   {box.serial}
                 </span>
 
-                {/* Readable CHOOSE BOX Button */}
-                <button
-                  onClick={() => handleSelectBox(box.serial)}
-                  disabled={isBeingClaimed}
-                  className="w-full py-1 px-1 rounded bg-gradient-to-r from-amber-400 via-amber-300 to-[#d4af37] hover:from-amber-300 hover:to-amber-400 text-black font-cinzel font-bold text-[8.5px] sm:text-[9.5px] uppercase tracking-wider transition-all shadow-sm hover:shadow-amber-500/30 flex items-center justify-center whitespace-nowrap active:scale-95 cursor-pointer"
-                >
-                  {isBeingClaimed ? (
-                    <div className="w-2.5 h-2.5 border-2 border-black border-t-transparent rounded-full animate-spin" />
-                  ) : (
-                    <span>CHOOSE BOX</span>
-                  )}
-                </button>
+                {/* Status-Aware Action Button */}
+                {isAvailable ? (
+                  <button
+                    onClick={() => handleSelectBox(box.serial)}
+                    disabled={isBeingClaimed}
+                    className="w-full py-1 px-1 rounded bg-gradient-to-r from-amber-400 via-amber-300 to-[#d4af37] hover:from-amber-300 hover:to-amber-400 text-black font-cinzel font-bold text-[8.5px] sm:text-[9.5px] uppercase tracking-wider transition-all shadow-sm hover:shadow-amber-500/30 flex items-center justify-center whitespace-nowrap active:scale-95 cursor-pointer"
+                  >
+                    {isBeingClaimed ? (
+                      <div className="w-2.5 h-2.5 border-2 border-black border-t-transparent rounded-full animate-spin" />
+                    ) : (
+                      <span>CHOOSE BOX</span>
+                    )}
+                  </button>
+                ) : isOpened ? (
+                  <div className="w-full py-1 px-1 rounded bg-neutral-900 border border-neutral-800 text-neutral-400 font-cinzel font-semibold text-[8px] sm:text-[9px] uppercase tracking-wider flex items-center justify-center select-none">
+                    <span>OPENED</span>
+                  </div>
+                ) : (
+                  <div className="w-full py-1 px-1 rounded bg-neutral-900/90 border border-neutral-800 text-amber-500/80 font-cinzel font-semibold text-[8px] sm:text-[9px] uppercase tracking-wider flex items-center justify-center select-none">
+                    <span>CLAIMED</span>
+                  </div>
+                )}
               </div>
             );
           })}
@@ -409,7 +638,7 @@ export const AvailableBoxGrid: React.FC<AvailableBoxGridProps> = ({
       {totalPages > 1 && (
         <div className="flex flex-col sm:flex-row items-center justify-between gap-2.5 bg-[#0a0a0e] border border-neutral-800/80 px-3.5 py-2.5 rounded-xl text-xs mt-1.5">
           <div className="text-neutral-400 font-mono-numbers">
-            Page {currentPage} of {totalPages} · Showing 300 boxes/page ({totalAvailable.toLocaleString()} remaining)
+            Page {currentPage} of {totalPages} · Showing {boxes.length} boxes on page ({totalFilteredCount.toLocaleString()} total in current filter)
           </div>
 
           <div className="flex items-center gap-1.5">

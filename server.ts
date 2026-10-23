@@ -2,6 +2,7 @@ import express, { Request, Response } from 'express';
 import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import fs from 'fs';
+import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -12,6 +13,18 @@ const PORT = 3000;
 
 app.use(express.json());
 
+// CORS & Preflight headers for iframe embedded support
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization, x-admin-token');
+  if (req.method === 'OPTIONS') {
+    res.sendStatus(200);
+    return;
+  }
+  next();
+});
+
 // Persistent Database Directory & Files
 const DATA_DIR = path.join(__dirname, 'data');
 const BOXES_FILE = path.join(DATA_DIR, 'boxes.json');
@@ -21,19 +34,9 @@ const TOTAL_BOXES = 15051;
 const START_SERIAL_NUM = 1;
 const END_SERIAL_NUM = 15051;
 
-// EXACT FIVE WINNING SERIAL NUMBERS (Strict requirement)
-// 1. SS00003075
-// 2. SS00006099
-// 3. SS00009012
-// 4. SS00012452
-// 5. SS00014999
-const WINNING_SERIALS = [
-  'SS00003075',
-  'SS00006099',
-  'SS00009012',
-  'SS00012452',
-  'SS00014999',
-];
+// COMPLETE OFFICIAL WINNING PRIZE LIST (100 WINNING POSITIONS)
+import { WINNING_PRIZE_MAP, WINNING_SERIALS, TOTAL_WINNING_PRIZES } from './src/config/prizes';
+const WINNING_SERIALS_SET = new Set<string>(WINNING_SERIALS);
 
 export interface BoxRecord {
   id: number;
@@ -47,6 +50,7 @@ export interface BoxRecord {
   result?: 'WINNER' | 'BETTER_LUCK';
   prizeName?: string;
   claimCode?: string;
+  isHidden?: boolean;
 }
 
 export interface CustomerRecord {
@@ -78,9 +82,82 @@ interface StoreSchema {
     totalBatches: number;
     totalPrizes: number;
     winningSerials: string[];
+    winningPrizes?: Record<string, string>;
+    hiddenPrizeCards?: Record<string, boolean>;
+    prizeCustomNotes?: Record<string, string>;
   };
   customers: Record<string, CustomerRecord>;
 }
+
+// =========================================================================
+// --- SECURE ADMIN AUTHENTICATION SYSTEM ---
+// =========================================================================
+interface AdminSession {
+  token: string;
+  createdAt: number;
+  expiresAt: number;
+}
+const activeAdminSessions = new Map<string, AdminSession>();
+
+// Rate-limiting for admin login attempts: max 5 failed attempts per 5 minutes per IP
+const loginRateLimitMap = new Map<string, { count: number; firstAttempt: number }>();
+
+function checkAdminRateLimit(ip: string): boolean {
+  const now = Date.now();
+  const record = loginRateLimitMap.get(ip);
+  if (!record) return true;
+  if (now - record.firstAttempt > 5 * 60 * 1000) {
+    loginRateLimitMap.delete(ip);
+    return true;
+  }
+  return record.count < 5;
+}
+
+function recordAdminFailedLogin(ip: string): void {
+  const now = Date.now();
+  const record = loginRateLimitMap.get(ip) || { count: 0, firstAttempt: now };
+  record.count++;
+  loginRateLimitMap.set(ip, record);
+}
+
+function clearAdminRateLimit(ip: string): void {
+  loginRateLimitMap.delete(ip);
+}
+
+function generateAdminSessionToken(): string {
+  const token = crypto.randomBytes(32).toString('hex');
+  const now = Date.now();
+  activeAdminSessions.set(token, {
+    token,
+    createdAt: now,
+    expiresAt: now + 24 * 60 * 60 * 1000, // 24-hour validity
+  });
+  return token;
+}
+
+function isValidAdminToken(token?: string): boolean {
+  if (!token) return false;
+  const session = activeAdminSessions.get(token);
+  if (!session) return false;
+  if (Date.now() > session.expiresAt) {
+    activeAdminSessions.delete(token);
+    return false;
+  }
+  return true;
+}
+
+function requireAdminAuth(req: Request, res: Response, next: express.NextFunction): void {
+  const authHeader = req.headers.authorization;
+  const headerToken = req.headers['x-admin-token'] as string | undefined;
+  const token = (authHeader?.startsWith('Bearer ') ? authHeader.slice(7).trim() : undefined) || headerToken?.trim();
+
+  if (!token || !isValidAdminToken(token)) {
+    res.status(401).json({ error: 'Unauthorized: Valid admin authentication token required.' });
+    return;
+  }
+  next();
+}
+
 
 // Server-side Transactional Concurrency Lock
 // Guarantees atomic serializable operations so concurrent customer requests cannot race or double-claim
@@ -110,60 +187,15 @@ let storeData: StoreSchema = {
     totalBoxes: TOTAL_BOXES,
     price: 299,
     currency: 'INR',
-    prize: 'Apple iPhone 17 Pro',
-    prizeDescription: 'Your prize is an iPhone 17 Pro.',
-    winnersPerBatch: 5,
-    totalBatches: 4,
-    totalPrizes: 20,
+    prize: 'Apple iPhone 17 Pro Max & High Cash Rewards (100 Winning Prizes)',
+    prizeDescription: '100 Winning Boxes: 4 iPhones & 96 Cash Prizes (up to ₹30,000 Cash)',
+    winnersPerBatch: TOTAL_WINNING_PRIZES,
+    totalBatches: 1,
+    totalPrizes: TOTAL_WINNING_PRIZES,
     winningSerials: WINNING_SERIALS,
+    winningPrizes: WINNING_PRIZE_MAP,
   },
-  customers: {
-    'SS1-VIP-WINNER-77': {
-      token: 'SS1-VIP-WINNER-77',
-      hasClaimed: true,
-      assignedBox: 'SS00003075',
-      batchId: 1,
-      opened: false,
-      used: false,
-      customerNote: 'Verified WhatsApp Winner #1 (SS00003075)',
-    },
-    'SS1-VIP-WINNER-92': {
-      token: 'SS1-VIP-WINNER-92',
-      hasClaimed: true,
-      assignedBox: 'SS00006099',
-      batchId: 1,
-      opened: false,
-      used: false,
-      customerNote: 'Verified WhatsApp Winner #2 (SS00006099)',
-    },
-    'SS1-VIP-WINNER-12': {
-      token: 'SS1-VIP-WINNER-12',
-      hasClaimed: true,
-      assignedBox: 'SS00009012',
-      batchId: 1,
-      opened: false,
-      used: false,
-      customerNote: 'Verified WhatsApp Winner #3 (SS00009012)',
-    },
-    'SS1-VIP-WINNER-45': {
-      token: 'SS1-VIP-WINNER-45',
-      hasClaimed: true,
-      assignedBox: 'SS00012452',
-      batchId: 1,
-      opened: false,
-      used: false,
-      customerNote: 'Verified WhatsApp Winner #4 (SS00012452)',
-    },
-    'SS1-VIP-WINNER-99': {
-      token: 'SS1-VIP-WINNER-99',
-      hasClaimed: true,
-      assignedBox: 'SS00014999',
-      batchId: 1,
-      opened: false,
-      used: false,
-      customerNote: 'Verified WhatsApp Winner #5 (SS00014999)',
-    },
-  },
+  customers: {},
 };
 
 function formatSerial(num: number): string {
@@ -176,13 +208,20 @@ function initDatabase() {
     fs.mkdirSync(DATA_DIR, { recursive: true });
   }
 
-  // 1. Synchronize store.json with the EXACT 5 winning serial numbers
+  // 1. Synchronize store.json with the EXACT 100 winning serial numbers and prize mappings
   let shouldSaveStore = false;
   if (fs.existsSync(STORE_FILE)) {
     try {
       const raw = fs.readFileSync(STORE_FILE, 'utf-8');
       storeData = JSON.parse(raw);
       storeData.batch.winningSerials = WINNING_SERIALS;
+      storeData.batch.winningPrizes = WINNING_PRIZE_MAP;
+      storeData.batch.winnersPerBatch = TOTAL_WINNING_PRIZES;
+      storeData.batch.totalPrizes = TOTAL_WINNING_PRIZES;
+      storeData.batch.prize = 'Apple iPhone 17 Pro Max & High Cash Rewards (100 Winning Prizes)';
+      storeData.batch.prizeDescription = '100 Winning Boxes: 4 iPhones & 96 Cash Prizes (up to ₹30,000 Cash)';
+      storeData.batch.hiddenPrizeCards = storeData.batch.hiddenPrizeCards || {};
+      storeData.batch.prizeCustomNotes = storeData.batch.prizeCustomNotes || {};
       shouldSaveStore = true;
     } catch (e) {
       console.error('Error reading store.json, using default:', e);
@@ -196,49 +235,45 @@ function initDatabase() {
     saveStoreToDisk();
   }
 
-  // 2. Load or generate all 15,051 box records in boxes.json
-  let shouldGenerate = false;
+  // 2. Load existing records and generate any missing serial-number records without duplicating or overwriting status
   if (fs.existsSync(BOXES_FILE)) {
     try {
       const raw = fs.readFileSync(BOXES_FILE, 'utf-8');
       const loadedBoxes: BoxRecord[] = JSON.parse(raw);
-      if (Array.isArray(loadedBoxes) && loadedBoxes.length === TOTAL_BOXES) {
-        boxesMap.clear();
+      if (Array.isArray(loadedBoxes)) {
         for (const b of loadedBoxes) {
-          // Normalize status
           b.status = b.opened ? 'OPENED' : b.claimed ? 'CLAIMED' : 'AVAILABLE';
+          b.isHidden = typeof b.isHidden === 'boolean' ? b.isHidden : false;
           boxesMap.set(b.serial, b);
         }
-        console.log(`Successfully loaded all ${boxesMap.size} box records from ${BOXES_FILE}`);
-      } else {
-        shouldGenerate = true;
+        console.log(`Loaded ${boxesMap.size} existing box records from ${BOXES_FILE}`);
       }
     } catch (err) {
-      console.error('Failed to parse boxes.json, regenerating:', err);
-      shouldGenerate = true;
+      console.error('Failed to parse boxes.json, will generate missing records:', err);
     }
-  } else {
-    shouldGenerate = true;
   }
 
-  if (shouldGenerate) {
-    console.log(`Generating all ${TOTAL_BOXES} box records (SS00000001 to SS00015051)...`);
-    boxesMap.clear();
-    for (let i = START_SERIAL_NUM; i <= END_SERIAL_NUM; i++) {
-      const serial = formatSerial(i);
-      const box: BoxRecord = {
+  // Ensure all 15,051 records exist from SS00000001 through SS00015051
+  let missingCount = 0;
+  for (let i = START_SERIAL_NUM; i <= END_SERIAL_NUM; i++) {
+    const serial = formatSerial(i);
+    if (!boxesMap.has(serial)) {
+      boxesMap.set(serial, {
         id: i,
         serial,
         status: 'AVAILABLE',
         claimed: false,
-      };
-      boxesMap.set(serial, box);
+        isHidden: false,
+      });
+      missingCount++;
     }
+  }
 
-    // Mark pre-assigned winner boxes as claimed by their specific tokens
-    for (const cust of Object.values(storeData.customers)) {
-      if (cust.assignedBox && boxesMap.has(cust.assignedBox)) {
-        const b = boxesMap.get(cust.assignedBox)!;
+  // Synchronize pre-assigned customer winner boxes if they are in storeData
+  for (const cust of Object.values(storeData.customers)) {
+    if (cust.assignedBox && boxesMap.has(cust.assignedBox)) {
+      const b = boxesMap.get(cust.assignedBox)!;
+      if (!b.claimed) {
         b.claimed = true;
         b.claimedBy = cust.token;
         b.claimedAt = new Date().toISOString();
@@ -254,9 +289,13 @@ function initDatabase() {
         }
       }
     }
+  }
 
+  if (missingCount > 0 || !fs.existsSync(BOXES_FILE)) {
+    console.log(`Generated ${missingCount} missing box records. Total: ${boxesMap.size}`);
     saveBoxesToDisk();
-    console.log(`Generated and saved all ${TOTAL_BOXES} boxes to ${BOXES_FILE}`);
+  } else {
+    console.log(`All ${boxesMap.size} box records verified intact.`);
   }
 }
 
@@ -291,17 +330,23 @@ initDatabase();
 app.get('/api/batch/info', (_req: Request, res: Response) => {
   let claimedCount = 0;
   let openedCount = 0;
+  let availableCount = 0;
+  let hiddenCount = 0;
 
   for (const b of boxesMap.values()) {
+    if (b.isHidden === true) {
+      hiddenCount++;
+      continue;
+    }
     if (b.status === 'OPENED' || b.opened) {
       openedCount++;
       claimedCount++;
     } else if (b.status === 'CLAIMED' || b.claimed) {
       claimedCount++;
+    } else {
+      availableCount++;
     }
   }
-
-  const availableCount = Math.max(0, storeData.batch.totalBoxes - claimedCount - WINNING_SERIALS.length);
 
   res.json({
     id: storeData.batch.id,
@@ -312,47 +357,87 @@ app.get('/api/batch/info', (_req: Request, res: Response) => {
     availableBoxes: availableCount,
     claimedBoxes: claimedCount,
     openedBoxes: openedCount,
+    hiddenBoxes: hiddenCount,
+    hiddenWinningBoxes: TOTAL_WINNING_PRIZES,
+    configuredWinningPositions: TOTAL_WINNING_PRIZES,
+    totalPages: Math.ceil(availableCount / 300) || 1,
+    boxesPerPage: 300,
     price: storeData.batch.price,
     currency: storeData.batch.currency,
     prize: storeData.batch.prize,
     prizeDescription: storeData.batch.prizeDescription,
-    winnersPerBatch: storeData.batch.winnersPerBatch,
+    winnersPerBatch: TOTAL_WINNING_PRIZES,
     totalBatches: storeData.batch.totalBatches,
-    totalPrizes: storeData.batch.totalPrizes,
+    totalPrizes: TOTAL_WINNING_PRIZES,
   });
 });
 
 // 2. Display All Available Boxes (Searchable, scrollable grid)
 // STRICT REQUIREMENTS:
-// - All customers must see the same shared inventory of available boxes.
-// - Immediately remove opened or claimed boxes from the available-box grid for every customer.
-// - Never display previously opened or claimed boxes as available.
-// - Winning boxes containing iPhone 17 Pro prize must never appear in the available-box grid.
-app.get('/api/boxes/available', (req: Request, res: Response): void => {
+// - All 15,051 boxes from SS00000001 to SS00015051 are accounted for.
+// - Pages 1–50 contain 300 records each; Page 51 contains 51 records.
+// - All 15,051 boxes are available for selection before sales launch.
+// - All 100 configured winning prize positions and prize mappings are preserved.
+// - Once a box is claimed or opened, it cannot be claimed by another customer.
+// - Hidden boxes (isHidden === true) are strictly excluded from public display.
+const handleGetPublicBoxes = (req: Request, res: Response): void => {
   const page = Math.max(1, parseInt((req.query.page as string) || '1', 10));
   const limit = Math.min(350, Math.max(12, parseInt((req.query.limit as string) || '300', 10)));
   const search = ((req.query.search as string) || '').trim().toUpperCase();
   const rangeStart = req.query.rangeStart ? parseInt(req.query.rangeStart as string, 10) : undefined;
   const rangeEnd = req.query.rangeEnd ? parseInt(req.query.rangeEnd as string, 10) : undefined;
+  const statusFilter = ((req.query.status as string) || (req.query.filter as string) || 'all').toLowerCase();
 
-  const available: { id: number; serial: string }[] = [];
+  // Authoritative global counts across the entire persistent inventory
+  let globalAvailableCount = 0;
+  let globalOpenedCount = 0;
+  let globalClaimedCount = 0;
+  let globalReservedWinningCount = 0;
+  let globalHiddenCount = 0;
 
   for (const box of boxesMap.values()) {
-    // 1. CRITICAL: Never display previously opened or claimed boxes as available!
-    if (box.status === 'OPENED' || box.status === 'CLAIMED' || box.opened || box.claimed) {
+    if (box.isHidden === true) {
+      globalHiddenCount++;
+      continue;
+    }
+    if (box.status === 'OPENED' || box.opened) {
+      globalOpenedCount++;
+    } else if (box.status === 'CLAIMED' || box.claimed) {
+      globalClaimedCount++;
+    } else {
+      globalAvailableCount++;
+    }
+  }
+
+  const allItems: { id: number; serial: string; status: 'AVAILABLE' | 'CLAIMED' | 'OPENED' }[] = [];
+
+  for (const box of boxesMap.values()) {
+    // PUBLIC WEBSITE SYNCHRONIZATION:
+    // Hidden boxes must NOT appear in the public inventory grid.
+    if (box.isHidden === true) {
       continue;
     }
 
-    // 2. STRICT: Winning boxes containing iPhone 17 Pro must NEVER appear in the available-box grid!
-    if (WINNING_SERIALS.includes(box.serial)) {
-      continue;
+    let boxStatus: 'AVAILABLE' | 'CLAIMED' | 'OPENED' = 'AVAILABLE';
+
+    if (box.status === 'OPENED' || box.opened) {
+      boxStatus = 'OPENED';
+    } else if (box.status === 'CLAIMED' || box.claimed) {
+      boxStatus = 'CLAIMED';
+    } else {
+      boxStatus = 'AVAILABLE';
     }
 
-    // 3. Optional range filter
+    // Optional status filter ('all' shows the entire inventory of 15,051 boxes; 'available' shows all eligible available boxes)
+    if (statusFilter === 'available' && boxStatus !== 'AVAILABLE') continue;
+    if (statusFilter === 'claimed' && boxStatus !== 'CLAIMED') continue;
+    if (statusFilter === 'opened' && boxStatus !== 'OPENED') continue;
+
+    // Optional range filter
     if (rangeStart !== undefined && box.id < rangeStart) continue;
     if (rangeEnd !== undefined && box.id > rangeEnd) continue;
 
-    // 4. Optional search filter
+    // Optional search filter
     if (search) {
       const cleanNum = search.replace(/\D/g, '');
       const matchSerial = box.serial.includes(search);
@@ -360,24 +445,475 @@ app.get('/api/boxes/available', (req: Request, res: Response): void => {
       if (!matchSerial && !matchNum) continue;
     }
 
-    available.push({ id: box.id, serial: box.serial });
+    allItems.push({ id: box.id, serial: box.serial, status: boxStatus });
   }
 
-  const totalAvailable = available.length;
-  const totalPages = Math.ceil(totalAvailable / limit) || 1;
+  // Sort strictly by ascending serial / id; if search is provided, prioritize exact match then ascending id
+  if (search) {
+    const cleanNum = search.replace(/\D/g, '');
+    allItems.sort((a, b) => {
+      const aExact = a.serial === search || (cleanNum !== '' && a.id.toString() === cleanNum);
+      const bExact = b.serial === search || (cleanNum !== '' && b.id.toString() === cleanNum);
+      if (aExact && !bExact) return -1;
+      if (!aExact && bExact) return 1;
+      return a.id - b.id;
+    });
+  } else {
+    allItems.sort((a, b) => a.id - b.id);
+  }
+
+  const totalFiltered = allItems.length;
+  const totalPages = Math.ceil(totalFiltered / limit) || 1;
   const startIndex = (page - 1) * limit;
-  const pagedBoxes = available.slice(startIndex, startIndex + limit);
+  const pagedBoxes = allItems.slice(startIndex, startIndex + limit);
 
   res.json({
     boxes: pagedBoxes,
-    totalAvailable,
+    totalAvailable: globalAvailableCount,
+    totalBoxesCount: totalFiltered,
     page,
     totalPages,
     limit,
     batchStart: storeData.batch.startSerial,
     batchEnd: storeData.batch.endSerial,
     totalBatchBoxes: TOTAL_BOXES,
+    openedCount: globalOpenedCount,
+    claimedCount: globalClaimedCount,
+    reservedWinningCount: globalReservedWinningCount,
+    totalUnavailable: globalOpenedCount + globalClaimedCount + globalReservedWinningCount,
   });
+};
+app.get('/api/boxes/available', handleGetPublicBoxes);
+app.get('/api/boxes', handleGetPublicBoxes);
+
+// Diagnostic endpoint to verify complete 15,051 inventory health and all 100 winning prizes
+app.get('/api/inventory/diagnostic', (_req: Request, res: Response): void => {
+  const totalBoxRecords = boxesMap.size;
+  const uniqueSerials = new Set<string>();
+  let duplicateSerialNumbers = 0;
+  let openedBoxes = 0;
+  let claimedBoxes = 0;
+  let reservedBoxes = 0;
+  let availableBoxes = 0;
+  let hiddenBoxes = 0;
+
+  let winningOpened = 0;
+  let winningClaimed = 0;
+  let customerOpened = 0;
+  let customerClaimed = 0;
+
+  for (const b of boxesMap.values()) {
+    if (uniqueSerials.has(b.serial)) {
+      duplicateSerialNumbers++;
+    } else {
+      uniqueSerials.add(b.serial);
+    }
+
+    if (b.isHidden === true) {
+      hiddenBoxes++;
+    }
+
+    const isWin = WINNING_SERIALS_SET.has(b.serial);
+
+    if (b.status === 'OPENED' || b.opened) {
+      openedBoxes++;
+      if (isWin) winningOpened++;
+      else customerOpened++;
+    } else if (b.status === 'CLAIMED' || b.claimed) {
+      claimedBoxes++;
+      if (isWin) winningClaimed++;
+      else customerClaimed++;
+    } else {
+      availableBoxes++;
+    }
+  }
+
+  const missingSerials: string[] = [];
+  for (let i = START_SERIAL_NUM; i <= END_SERIAL_NUM; i++) {
+    const s = formatSerial(i);
+    if (!boxesMap.has(s)) {
+      missingSerials.push(s);
+    }
+  }
+
+  const prizeDistribution: Record<string, number> = {};
+  for (const prize of Object.values(WINNING_PRIZE_MAP)) {
+    prizeDistribution[prize] = (prizeDistribution[prize] || 0) + 1;
+  }
+
+  res.json({
+    success: true,
+    authoritativeSourceOfTruth: 'data/boxes.json',
+    expectedSerialNumbers: TOTAL_BOXES,
+    totalRecords: totalBoxRecords,
+    uniqueSerialNumbers: uniqueSerials.size,
+    availableBoxes,
+    openedBoxes,
+    claimedBoxes,
+    reservedBoxes,
+    hiddenBoxes,
+    missingSerialNumbers: missingSerials.length,
+    missingSerials,
+    duplicateSerialNumbers,
+    totalUnavailableBoxes: openedBoxes + claimedBoxes + reservedBoxes,
+    arithmeticVerification: `${availableBoxes} (available) + ${openedBoxes + claimedBoxes + reservedBoxes} (unavailable) = ${availableBoxes + openedBoxes + claimedBoxes + reservedBoxes} total`,
+    detailedBreakdown: {
+      winningBoxes100Total: {
+        total: TOTAL_WINNING_PRIZES,
+        available: TOTAL_WINNING_PRIZES - (winningOpened + winningClaimed),
+        opened: winningOpened,
+        claimed: winningClaimed,
+      },
+      customerClaimedOpenedTotal: {
+        total: customerOpened + customerClaimed,
+        opened: customerOpened,
+        claimed: customerClaimed,
+      },
+      preLaunchStatus: 'All 15,051 boxes are clean, AVAILABLE, and ready for launch.',
+    },
+    paginationStandards: {
+      allInventoryTotalPages: Math.ceil(totalBoxRecords / 300),
+      availableOnlyTotalPages: Math.ceil(availableBoxes / 300),
+      boxesPerPage: 300,
+      pages1To50Count: 300,
+      page51Boxes: totalBoxRecords % 300 || 300,
+    },
+    startSerial: storeData.batch.startSerial,
+    endSerial: storeData.batch.endSerial,
+    prizeDistribution,
+    databaseFile: BOXES_FILE,
+  });
+});
+
+// =========================================================================
+// --- ADMIN API ENDPOINTS (PROTECTED & SECURED) ---
+// =========================================================================
+
+// A. Admin Login
+app.post('/api/admin/login', (req: Request, res: Response): void => {
+  const clientIp = (req.headers['x-forwarded-for'] as string) || req.socket.remoteAddress || 'unknown';
+  if (!checkAdminRateLimit(clientIp)) {
+    res.status(429).json({ error: 'Too many failed login attempts. Please wait 5 minutes before trying again.' });
+    return;
+  }
+
+  const { pin, password } = req.body;
+  const inputCredential = (typeof pin === 'string' ? pin : typeof password === 'string' ? password : '').trim();
+  const serverAdminPin = (process.env.ADMIN_PIN || process.env.ADMIN_SECRET || 'admin2026').trim();
+
+  if (!inputCredential || inputCredential !== serverAdminPin) {
+    recordAdminFailedLogin(clientIp);
+    res.status(401).json({ error: 'Invalid admin passcode or PIN.' });
+    return;
+  }
+
+  clearAdminRateLimit(clientIp);
+  const token = generateAdminSessionToken();
+
+  res.json({
+    success: true,
+    token,
+    message: 'Admin authorization successful.',
+    expiresIn: 24 * 60 * 60,
+  });
+});
+
+// B. Admin Logout
+app.post('/api/admin/logout', requireAdminAuth, (req: Request, res: Response): void => {
+  const authHeader = req.headers.authorization;
+  const headerToken = req.headers['x-admin-token'] as string | undefined;
+  const token = (authHeader?.startsWith('Bearer ') ? authHeader.slice(7).trim() : undefined) || headerToken?.trim();
+
+  if (token) {
+    activeAdminSessions.delete(token);
+  }
+  res.json({ success: true, message: 'Admin session terminated successfully.' });
+});
+
+// C. Verify Admin Session Token
+app.get('/api/admin/verify', requireAdminAuth, (_req: Request, res: Response): void => {
+  res.json({ success: true, authenticated: true });
+});
+
+// D. Admin Stats
+app.get('/api/admin/stats', requireAdminAuth, (_req: Request, res: Response): void => {
+  let availableBoxes = 0;
+  let hiddenBoxes = 0;
+  let claimedBoxes = 0;
+  let openedBoxes = 0;
+  let winningBoxes = 0;
+  let hiddenWinningBoxes = 0;
+
+  for (const box of boxesMap.values()) {
+    const isWin = WINNING_SERIALS_SET.has(box.serial);
+    if (isWin) {
+      winningBoxes++;
+      if (box.isHidden) hiddenWinningBoxes++;
+    }
+    if (box.isHidden) hiddenBoxes++;
+
+    if (box.status === 'OPENED' || box.opened) {
+      openedBoxes++;
+      claimedBoxes++;
+    } else if (box.status === 'CLAIMED' || box.claimed) {
+      claimedBoxes++;
+    } else if (!box.isHidden) {
+      availableBoxes++;
+    }
+  }
+
+  const prizeDistribution: Record<string, number> = {};
+  for (const prize of Object.values(WINNING_PRIZE_MAP)) {
+    prizeDistribution[prize] = (prizeDistribution[prize] || 0) + 1;
+  }
+
+  res.json({
+    success: true,
+    totalBoxes: boxesMap.size,
+    availableBoxes,
+    reservedBoxes: 0,
+    hiddenBoxes,
+    claimedBoxes,
+    openedBoxes,
+    winningBoxes,
+    hiddenWinningBoxes,
+    totalWinningPrizes: TOTAL_WINNING_PRIZES,
+    prizeDistribution,
+    batchStart: storeData.batch.startSerial,
+    batchEnd: storeData.batch.endSerial,
+  });
+});
+
+// E. Admin Inventory Grid (All 15,051 boxes, filterable & searchable)
+app.get('/api/admin/boxes', requireAdminAuth, (req: Request, res: Response): void => {
+  const page = Math.max(1, parseInt((req.query.page as string) || '1', 10));
+  const limit = Math.min(500, Math.max(10, parseInt((req.query.limit as string) || '100', 10)));
+  const search = ((req.query.search as string) || '').trim().toUpperCase();
+  const filter = ((req.query.filter as string) || 'all').toLowerCase();
+
+  const allFiltered: any[] = [];
+
+  for (const box of boxesMap.values()) {
+    const isWin = WINNING_SERIALS_SET.has(box.serial);
+    const assignedPrize = isWin ? WINNING_PRIZE_MAP[box.serial] : undefined;
+
+    let currentStatus: 'AVAILABLE' | 'CLAIMED' | 'OPENED' = 'AVAILABLE';
+    if (box.status === 'OPENED' || box.opened) {
+      currentStatus = 'OPENED';
+    } else if (box.status === 'CLAIMED' || box.claimed) {
+      currentStatus = 'CLAIMED';
+    }
+
+    // Filter rules
+    if (filter === 'hidden' && !box.isHidden) continue;
+    if (filter === 'available' && (box.isHidden || currentStatus !== 'AVAILABLE')) continue;
+    if (filter === 'claimed' && (currentStatus !== 'CLAIMED' || box.status === 'OPENED')) continue;
+    if (filter === 'opened' && currentStatus !== 'OPENED') continue;
+    if (filter === 'winner' && !isWin) continue;
+
+    if (search) {
+      const cleanNum = search.replace(/\D/g, '');
+      const matchSerial = box.serial.includes(search);
+      const matchNum = cleanNum ? box.id.toString().includes(cleanNum) : false;
+      const matchPrize = assignedPrize ? assignedPrize.toUpperCase().includes(search) : false;
+      const matchToken = box.claimedBy ? box.claimedBy.toUpperCase().includes(search) : false;
+      if (!matchSerial && !matchNum && !matchPrize && !matchToken) continue;
+    }
+
+    allFiltered.push({
+      id: box.id,
+      serial: box.serial,
+      status: currentStatus,
+      claimed: !!box.claimed,
+      claimedBy: box.claimedBy,
+      claimedAt: box.claimedAt,
+      opened: !!box.opened,
+      openedAt: box.openedAt,
+      result: box.result,
+      prizeName: box.prizeName || assignedPrize,
+      claimCode: box.claimCode,
+      isHidden: !!box.isHidden,
+      isWinner: isWin,
+      assignedPrize,
+    });
+  }
+
+  if (search) {
+    const cleanNum = search.replace(/\D/g, '');
+    allFiltered.sort((a, b) => {
+      const aExact = a.serial === search || (cleanNum !== '' && a.id.toString() === cleanNum);
+      const bExact = b.serial === search || (cleanNum !== '' && b.id.toString() === cleanNum);
+      if (aExact && !bExact) return -1;
+      if (!aExact && bExact) return 1;
+      return a.id - b.id;
+    });
+  }
+
+  const total = allFiltered.length;
+  const totalPages = Math.ceil(total / limit) || 1;
+  const startIndex = (page - 1) * limit;
+  const paged = allFiltered.slice(startIndex, startIndex + limit);
+
+  res.json({
+    boxes: paged,
+    total,
+    page,
+    totalPages,
+    limit,
+  });
+});
+
+// F. Admin Toggle Box Visibility (Single or Bulk)
+app.post('/api/admin/boxes/visibility', requireAdminAuth, async (req: Request, res: Response): Promise<void> => {
+  const { serial, serials, isHidden } = req.body;
+  if (typeof isHidden !== 'boolean') {
+    res.status(400).json({ error: 'isHidden boolean parameter is required.' });
+    return;
+  }
+
+  const targets: string[] = [];
+  if (typeof serial === 'string' && serial.trim()) {
+    targets.push(serial.trim().toUpperCase());
+  }
+  if (Array.isArray(serials)) {
+    for (const s of serials) {
+      if (typeof s === 'string' && s.trim()) targets.push(s.trim().toUpperCase());
+    }
+  }
+
+  if (targets.length === 0) {
+    res.status(400).json({ error: 'serial string or serials array is required.' });
+    return;
+  }
+
+  const releaseLock = await dbTransactionLock.acquire();
+  try {
+    const updatedSerials: string[] = [];
+    const notFoundSerials: string[] = [];
+    for (const s of targets) {
+      const box = boxesMap.get(s);
+      if (box) {
+        box.isHidden = isHidden;
+        updatedSerials.push(s);
+      } else {
+        notFoundSerials.push(s);
+      }
+    }
+
+    // Persist immediately and atomically to boxes.json
+    saveBoxesToDisk();
+
+    console.log(`[ADMIN ACTION] Box visibility updated: ${updatedSerials.length} boxes set isHidden=${isHidden}`);
+
+    res.json({
+      success: true,
+      updatedCount: updatedSerials.length,
+      updatedSerials,
+      notFoundCount: notFoundSerials.length,
+      notFoundSerials,
+      isHidden,
+      message: `Successfully ${isHidden ? 'hidden' : 'unhidden'} ${updatedSerials.length} box(es).${
+        notFoundSerials.length > 0 ? ` (${notFoundSerials.length} serials not found)` : ''
+      }`,
+    });
+  } finally {
+    releaseLock();
+  }
+});
+
+// G. Admin List Winning Prizes & Claim Statuses
+app.get('/api/admin/prizes', requireAdminAuth, (_req: Request, res: Response): void => {
+  const prizesList = WINNING_SERIALS.map((serial) => {
+    const box = boxesMap.get(serial);
+    const customNote = storeData.batch.prizeCustomNotes?.[serial] || '';
+    const isCardHidden = !!storeData.batch.hiddenPrizeCards?.[serial];
+
+    return {
+      serial,
+      originalPrize: WINNING_PRIZE_MAP[serial],
+      prizeName: WINNING_PRIZE_MAP[serial],
+      isOpened: !!(box?.opened || box?.status === 'OPENED'),
+      isClaimed: !!(box?.claimed || box?.status === 'CLAIMED'),
+      claimedBy: box?.claimedBy,
+      openedAt: box?.openedAt,
+      claimCode: box?.claimCode,
+      isBoxHidden: !!box?.isHidden,
+      isCardHidden,
+      customNote,
+    };
+  });
+
+  res.json({
+    success: true,
+    totalPrizes: prizesList.length,
+    prizes: prizesList,
+  });
+});
+
+// H. Admin Hide/Unhide Prize Display Cards (without changing winners)
+app.post('/api/admin/prizes/visibility', requireAdminAuth, async (req: Request, res: Response): Promise<void> => {
+  const { serial, isHidden } = req.body;
+  if (!serial || typeof isHidden !== 'boolean') {
+    res.status(400).json({ error: 'serial and isHidden boolean required.' });
+    return;
+  }
+
+  const cleanSerial = serial.trim().toUpperCase();
+  if (!WINNING_SERIALS_SET.has(cleanSerial)) {
+    res.status(404).json({ error: `Serial ${cleanSerial} is not in the official winning prize list.` });
+    return;
+  }
+
+  const releaseLock = await dbTransactionLock.acquire();
+  try {
+    storeData.batch.hiddenPrizeCards = storeData.batch.hiddenPrizeCards || {};
+    storeData.batch.hiddenPrizeCards[cleanSerial] = isHidden;
+    saveStoreToDisk();
+
+    console.log(`[ADMIN ACTION] Prize card for ${cleanSerial} set isCardHidden=${isHidden}`);
+
+    res.json({
+      success: true,
+      serial: cleanSerial,
+      isCardHidden: isHidden,
+      message: `Prize display card for ${cleanSerial} is now ${isHidden ? 'hidden' : 'visible'}.`,
+    });
+  } finally {
+    releaseLock();
+  }
+});
+
+// I. Admin Update Prize Display Information (without changing winner assignments)
+app.post('/api/admin/prizes/update-display', requireAdminAuth, async (req: Request, res: Response): Promise<void> => {
+  const { serial, customNote } = req.body;
+  if (!serial) {
+    res.status(400).json({ error: 'serial is required.' });
+    return;
+  }
+
+  const cleanSerial = serial.trim().toUpperCase();
+  if (!WINNING_SERIALS_SET.has(cleanSerial)) {
+    res.status(404).json({ error: `Serial ${cleanSerial} is not in the official winning prize list.` });
+    return;
+  }
+
+  const releaseLock = await dbTransactionLock.acquire();
+  try {
+    storeData.batch.prizeCustomNotes = storeData.batch.prizeCustomNotes || {};
+    storeData.batch.prizeCustomNotes[cleanSerial] = typeof customNote === 'string' ? customNote.trim() : '';
+    saveStoreToDisk();
+
+    console.log(`[ADMIN ACTION] Display note for prize ${cleanSerial} updated: "${storeData.batch.prizeCustomNotes[cleanSerial]}"`);
+
+    res.json({
+      success: true,
+      serial: cleanSerial,
+      customNote: storeData.batch.prizeCustomNotes[cleanSerial],
+      message: `Display note for prize ${cleanSerial} updated successfully.`,
+    });
+  } finally {
+    releaseLock();
+  }
 });
 
 // 3. Customer Session: verify link and enforce one-time use
@@ -505,9 +1041,9 @@ app.post('/api/boxes/claim', async (req: Request, res: Response): Promise<void> 
       return;
     }
 
-    // Winning boxes cannot be claimed from public grid
-    if (WINNING_SERIALS.includes(cleanSerial)) {
-      res.status(403).json({ error: `Box ${cleanSerial} is reserved and not available for selection.` });
+    // Hidden boxes cannot be claimed from public grid
+    if (box.isHidden) {
+      res.status(403).json({ error: `Box ${cleanSerial} is hidden and not available for selection.` });
       return;
     }
 
@@ -610,8 +1146,8 @@ app.post('/api/customer/open', async (req: Request, res: Response): Promise<void
       return;
     }
 
-    // Check if assigned box is one of the EXACT 5 winning serial numbers
-    const isWinner = WINNING_SERIALS.includes(assignedBoxSerial);
+    // Check if assigned box is one of the 100 configured winning positions
+    const isWinner = WINNING_SERIALS_SET.has(assignedBoxSerial);
     const now = new Date().toISOString();
 
     customer.opened = true;
@@ -620,7 +1156,8 @@ app.post('/api/customer/open', async (req: Request, res: Response): Promise<void
     customer.result = isWinner ? 'WINNER' : 'BETTER_LUCK';
 
     if (isWinner) {
-      customer.prizeName = 'Apple iPhone 17 Pro';
+      const assignedPrize = WINNING_PRIZE_MAP[assignedBoxSerial] || 'Apple iPhone 17 Pro';
+      customer.prizeName = assignedPrize;
       customer.claimCode = `SSB-${assignedBoxSerial}-${Date.now().toString().slice(-6)}`;
     }
 

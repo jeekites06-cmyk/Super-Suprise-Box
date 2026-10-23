@@ -5,6 +5,7 @@ interface LinkAlreadyUsedProps {
   serial: string;
   openedAt?: string;
   result?: 'WINNER' | 'BETTER_LUCK' | null;
+  prizeName?: string | null;
   claimCode?: string | null;
 }
 
@@ -12,11 +13,12 @@ export const LinkAlreadyUsed: React.FC<LinkAlreadyUsedProps> = ({
   serial,
   openedAt = new Date().toISOString(),
   result,
+  prizeName,
   claimCode,
 }) => {
   const isWinner = result === 'WINNER';
 
-  const claimMessage = `🎉 SUPER SURPRISE BOX WINNER CLAIM\n\nFull Name: \nRegistered Mobile: \nBox Serial: ${serial}\nClaim Code: ${claimCode || ''}\nPrize: Apple iPhone 17 Pro\n\nI am contacting you regarding my previously claimed winning box.`;
+  const claimMessage = `🎉 SUPER SURPRISE BOX WINNER CLAIM\n\nFull Name: \nRegistered Mobile: \nBox Serial: ${serial}\nClaim Code: ${claimCode || ''}\nPrize: ${prizeName || 'Official Prize'}\n\nI am contacting you regarding my previously claimed winning box.`;
   const whatsappUrl = `https://wa.me/?text=${encodeURIComponent(claimMessage)}`;
 
   return (
@@ -68,7 +70,7 @@ export const LinkAlreadyUsed: React.FC<LinkAlreadyUsedProps> = ({
             <span>Winning Record Confirmed</span>
           </div>
           <p className="text-xs text-neutral-300 mb-3">
-            This link won the <strong className="text-amber-200">Apple iPhone 17 Pro</strong>. Code:{' '}
+            This link won the <strong className="text-amber-200">{prizeName || 'Official Prize'}</strong>. Code:{' '}
             <span className="font-mono-numbers font-bold text-white">{claimCode}</span>.
           </p>
           <a

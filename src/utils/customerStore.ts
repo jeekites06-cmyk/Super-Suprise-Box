@@ -1,40 +1,30 @@
 import { CustomerSession, OpenResult } from '../types/box';
+import { WINNING_PRIZE_MAP, WINNING_SERIALS } from '../config/prizes';
 
-// Exactly 5 fixed winning box serial numbers (Batch 1: SS00000001 - SS00015051)
-export const EXACT_WINNING_SERIALS = [
-  'SS00003075',
-  'SS00006099',
-  'SS00009012',
-  'SS00012452',
-  'SS00014999',
-];
+// Complete official winning box serial numbers (Batch 1: SS00000001 - SS00015051)
+export const EXACT_WINNING_SERIALS = WINNING_SERIALS;
 
 // Pre-configured verified customer links for demonstration/testing
 export const DEFAULT_CUSTOMERS: Record<string, { assignedBox: string; isWinner: boolean; note: string }> = {
   'SS1-VIP-WINNER-77': {
     assignedBox: 'SS00003075',
     isWinner: true,
-    note: 'Verified WhatsApp Winner #1',
+    note: 'Verified WhatsApp Winner #1 (iPhone 17 Pro Max)',
   },
   'SS1-VIP-WINNER-92': {
     assignedBox: 'SS00006099',
     isWinner: true,
-    note: 'Verified WhatsApp Winner #2',
+    note: 'Verified WhatsApp Winner #2 (iPhone 17 Pro)',
   },
   'SS1-VIP-WINNER-12': {
     assignedBox: 'SS00009012',
     isWinner: true,
-    note: 'Verified WhatsApp Winner #3',
+    note: 'Verified WhatsApp Winner #3 (iPhone 17)',
   },
   'SS1-VIP-WINNER-45': {
     assignedBox: 'SS00012452',
     isWinner: true,
-    note: 'Verified WhatsApp Winner #4',
-  },
-  'SS1-VIP-WINNER-99': {
-    assignedBox: 'SS00014999',
-    isWinner: true,
-    note: 'Verified WhatsApp Winner #5',
+    note: 'Verified WhatsApp Winner #4 (iPhone 17)',
   },
 };
 
@@ -147,7 +137,7 @@ export async function fetchCustomerSession(token?: string | null): Promise<Custo
       alreadyUsed: !!cachedResult,
       openedAt: cachedResult?.openedAt,
       result: cachedResult?.result || null,
-      prizeName: cachedResult?.prizeName || (isWinner ? 'Apple iPhone 17 Pro' : null),
+      prizeName: cachedResult?.prizeName || (isWinner && localBox ? (WINNING_PRIZE_MAP[localBox] || 'Apple iPhone 17 Pro') : null),
       claimCode: cachedResult?.claimCode || null,
     };
   }
@@ -196,7 +186,7 @@ export async function openCustomerBox(token: string, boxSerial: string): Promise
       alreadyUsed: false,
       boxSerial,
       result: isWinner ? 'WINNER' : 'BETTER_LUCK',
-      prizeName: isWinner ? 'Apple iPhone 17 Pro' : undefined,
+      prizeName: isWinner ? (WINNING_PRIZE_MAP[boxSerial] || 'Apple iPhone 17 Pro') : undefined,
       openedAt,
       claimCode,
     };
