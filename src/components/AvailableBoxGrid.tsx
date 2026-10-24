@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useCallback, useTransition, useRef } from 'react';
 import { SurpriseBox3D } from './SurpriseBox3D';
-import { AvailableBox, AvailableBoxesResponse } from '../types/box';
-import { WINNING_SERIALS } from '../config/prizes';
+import { AvailableBox, AvailableBoxesResponse, PublicPrize } from '../types/box';
 import {
   Search,
   RefreshCw,
@@ -9,12 +8,13 @@ import {
   ChevronRight,
   Sparkles,
   AlertCircle,
-  Crown,
   Gift,
   Package,
   Trophy,
   Users,
   CheckCircle2,
+  Smartphone,
+  Banknote,
 } from 'lucide-react';
 
 interface AvailableBoxGridProps {
@@ -58,11 +58,14 @@ export const AvailableBoxGrid: React.FC<AvailableBoxGridProps> = ({
   onBoxClaimed,
 }) => {
   const [boxes, setBoxes] = useState<AvailableBox[]>([]);
+  const [totalInventory, setTotalInventory] = useState<number>(15051);
   const [totalAvailable, setTotalAvailable] = useState<number>(15051);
   const [totalFilteredCount, setTotalFilteredCount] = useState<number>(15051);
   const [openedCount, setOpenedCount] = useState<number>(0);
   const [claimedCount, setClaimedCount] = useState<number>(0);
+  const [reservedCount, setReservedCount] = useState<number>(0);
   const [reservedWinningCount, setReservedWinningCount] = useState<number>(0);
+  const [hiddenCount, setHiddenCount] = useState<number>(0);
   const [totalUnavailableCount, setTotalUnavailableCount] = useState<number>(0);
   const [currentPage, setCurrentPage] = useState<number>(1);
   const [totalPages, setTotalPages] = useState<number>(51);
@@ -70,6 +73,10 @@ export const AvailableBoxGrid: React.FC<AvailableBoxGridProps> = ({
   const [activeRange, setActiveRange] = useState<string>('all');
   const [statusFilter, setStatusFilter] = useState<'all' | 'available'>('all');
   const [loading, setLoading] = useState<boolean>(true);
+  const [publicPrizes, setPublicPrizes] = useState<PublicPrize[]>([]);
+  const [showcaseHidden, setShowcaseHidden] = useState<boolean>(false);
+  const [showPrizesSection, setShowPrizesSection] = useState<boolean>(true);
+  const [prizeSearch, setPrizeSearch] = useState<string>('');
   const [claimingSerial, setClaimingSerial] = useState<string | null>(null);
   const [claimError, setClaimError] = useState<string | null>(null);
   const [dbError, setDbError] = useState<string | null>(null);
@@ -118,13 +125,17 @@ export const AvailableBoxGrid: React.FC<AvailableBoxGridProps> = ({
           if (res.ok) {
             const data: AvailableBoxesResponse = await res.json();
             setBoxes(data.boxes);
+            if (data.totalInventory !== undefined) setTotalInventory(data.totalInventory);
+            else if (data.totalBatchBoxes !== undefined) setTotalInventory(data.totalBatchBoxes);
             setTotalAvailable(data.totalAvailable);
             setTotalFilteredCount(data.totalBoxesCount || data.totalAvailable);
             setTotalPages(data.totalPages);
             setCurrentPage(data.page);
             if (data.openedCount !== undefined) setOpenedCount(data.openedCount);
             if (data.claimedCount !== undefined) setClaimedCount(data.claimedCount);
+            if (data.reservedCount !== undefined) setReservedCount(data.reservedCount);
             if (data.reservedWinningCount !== undefined) setReservedWinningCount(data.reservedWinningCount);
+            if (data.hiddenCount !== undefined) setHiddenCount(data.hiddenCount);
             if (data.totalUnavailable !== undefined) setTotalUnavailableCount(data.totalUnavailable);
             setDbError(null);
             setLoading(false);
@@ -156,16 +167,33 @@ export const AvailableBoxGrid: React.FC<AvailableBoxGridProps> = ({
     []
   );
 
+  const fetchPublicPrizes = useCallback(async () => {
+    try {
+      const res = await fetch('/api/prizes');
+      if (res.ok) {
+        const data = await res.json();
+        setShowcaseHidden(!!data.showcaseHidden);
+        if (Array.isArray(data.prizes)) {
+          setPublicPrizes(data.prizes);
+        }
+      }
+    } catch (err) {
+      console.error('Failed to load public winning prizes:', err);
+    }
+  }, []);
+
   // Initial load & dependency update
   useEffect(() => {
     fetchAvailableBoxes(currentPage, searchQuery, activeRange, statusFilter, false);
-  }, [fetchAvailableBoxes, currentPage, searchQuery, activeRange, statusFilter]);
+    fetchPublicPrizes();
+  }, [fetchAvailableBoxes, fetchPublicPrizes, currentPage, searchQuery, activeRange, statusFilter]);
 
   // Periodic automatic sync for shared global availability (every 5s when tab is active)
   useEffect(() => {
     const handleSync = () => {
       if (document.visibilityState === 'visible') {
         fetchAvailableBoxes(currentPage, searchQuery, activeRange, statusFilter, true);
+        fetchPublicPrizes();
       }
     };
 
@@ -179,7 +207,7 @@ export const AvailableBoxGrid: React.FC<AvailableBoxGridProps> = ({
       window.removeEventListener('focus', handleSync);
       document.removeEventListener('visibilitychange', handleSync);
     };
-  }, [fetchAvailableBoxes, currentPage, searchQuery, activeRange, statusFilter]);
+  }, [fetchAvailableBoxes, fetchPublicPrizes, currentPage, searchQuery, activeRange, statusFilter]);
 
   // Handle Box Claim
   const handleSelectBox = async (serial: string) => {
@@ -254,7 +282,19 @@ export const AvailableBoxGrid: React.FC<AvailableBoxGridProps> = ({
     return pages;
   };
 
-  const availabilityPercentage = ((totalAvailable / 15051) * 100).toFixed(totalAvailable === 15051 ? 0 : 1);
+  const availabilityPercentage = ((totalAvailable / (totalInventory || 15051)) * 100).toFixed(
+    totalAvailable === totalInventory ? 0 : 1
+  );
+
+  const filteredPublicPrizes = publicPrizes.filter((p) => {
+    if (!prizeSearch.trim()) return true;
+    const query = prizeSearch.trim().toUpperCase();
+    return (
+      p.serial.toUpperCase().includes(query) ||
+      p.prizeName.toUpperCase().includes(query) ||
+      (p.customNote && p.customNote.toUpperCase().includes(query))
+    );
+  });
 
   return (
     <div className="w-full flex flex-col gap-4 sm:gap-6 overflow-x-hidden">
@@ -291,7 +331,7 @@ export const AvailableBoxGrid: React.FC<AvailableBoxGridProps> = ({
               TOTAL INVENTORY
             </span>
             <span className="text-2xl sm:text-3xl font-extrabold font-mono-numbers text-white tracking-tight block">
-              15,051
+              {totalInventory.toLocaleString()}
             </span>
           </div>
         </div>
@@ -311,21 +351,30 @@ export const AvailableBoxGrid: React.FC<AvailableBoxGridProps> = ({
           </div>
         </div>
 
-        {/* Card 3: WINNING PRIZES */}
-        <div className="bg-[#0c0c11]/95 border border-amber-500/40 hover:border-amber-400/80 rounded-2xl p-4 sm:p-5 flex items-center gap-4 transition-all duration-300 shadow-[0_10px_25px_rgba(0,0,0,0.7)] backdrop-blur-sm group min-h-[96px] h-full">
+        {/* Card 3: WINNING PRIZES (STATISTICS DISPLAY & SHOWCASE TOGGLE) */}
+        <div
+          onClick={() => setShowPrizesSection((prev) => !prev)}
+          className="bg-[#0c0c11]/95 border border-amber-500/40 hover:border-amber-400/80 rounded-2xl p-4 sm:p-5 flex items-center gap-4 transition-all duration-300 shadow-[0_10px_25px_rgba(0,0,0,0.7)] backdrop-blur-sm group min-h-[96px] h-full cursor-pointer"
+          title="Click to view/toggle official winning prizes showcase"
+        >
           <div className="w-12 h-12 rounded-full bg-gradient-to-tr from-amber-500/25 via-yellow-400/20 to-amber-300/10 border border-amber-400/50 flex items-center justify-center text-amber-300 shadow-[0_0_20px_rgba(245,158,11,0.3)] group-hover:scale-105 transition-transform shrink-0">
             <Trophy className="w-6 h-6 text-amber-300" />
           </div>
           <div className="flex-1 min-w-0">
-            <span className="text-[11px] font-cinzel font-semibold tracking-wider text-amber-400/90 uppercase block truncate">
-              WINNING PRIZES
-            </span>
+            <div className="flex items-center justify-between">
+              <span className="text-[11px] font-cinzel font-semibold tracking-wider text-amber-400/90 uppercase block truncate">
+                WINNING PRIZES
+              </span>
+              <span className="text-[10px] text-amber-400/70 font-cinzel group-hover:text-amber-300 transition-colors">
+                {showPrizesSection ? 'Hide' : 'Show'}
+              </span>
+            </div>
             <div className="flex items-baseline gap-1.5 flex-wrap">
               <span className="text-2xl sm:text-3xl font-extrabold font-mono-numbers text-amber-300 tracking-tight">
-                100
+                {publicPrizes.length}
               </span>
               <span className="text-[11px] text-neutral-400 font-medium whitespace-nowrap">
-                (4 iPhones • 96 Cash)
+                Active Cards
               </span>
             </div>
           </div>
@@ -361,6 +410,109 @@ export const AvailableBoxGrid: React.FC<AvailableBoxGridProps> = ({
             ✕
           </button>
         </div>
+      )}
+
+      {/* =========================================================================
+          OFFICIAL WINNING PRIZES SHOWCASE (ACTIVE VISIBLE PRIZES)
+         ========================================================================= */}
+      {!showcaseHidden && showPrizesSection && publicPrizes.length > 0 && (
+        <section
+          id="public-winning-prizes"
+          className="w-full bg-[#09090e]/95 border border-amber-500/30 rounded-2xl p-4 sm:p-6 shadow-2xl backdrop-blur-md space-y-4 animate-in fade-in duration-300"
+        >
+          {/* Section Header */}
+          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 border-b border-neutral-800 pb-3">
+            <div className="flex items-center gap-3">
+              <div className="w-9 h-9 rounded-xl bg-amber-500/20 border border-amber-400/50 flex items-center justify-center text-amber-300 shadow-[0_0_15px_rgba(245,158,11,0.25)] shrink-0">
+                <Sparkles className="w-5 h-5 text-amber-300" />
+              </div>
+              <div>
+                <h2 className="text-sm sm:text-base font-bold font-cinzel text-white uppercase tracking-wider flex items-center gap-2 flex-wrap">
+                  <span>OFFICIAL WINNING PRIZES SHOWCASE</span>
+                  <span className="px-2 py-0.5 rounded-full bg-amber-400/20 border border-amber-400/40 text-amber-300 text-[10px] font-mono-numbers font-semibold">
+                    {filteredPublicPrizes.length} Active Cards
+                  </span>
+                </h2>
+                <p className="text-[11px] text-neutral-400 mt-0.5">
+                  Verified flagship iPhones and guaranteed high-value cash prizes distributed across Batch 1
+                </p>
+              </div>
+            </div>
+
+            {/* Prize Search */}
+            <div className="relative w-full sm:w-64">
+              <Search className="w-3.5 h-3.5 text-neutral-500 absolute left-3 top-1/2 -translate-y-1/2" />
+              <input
+                type="text"
+                placeholder="Search prizes or serial..."
+                value={prizeSearch}
+                onChange={(e) => setPrizeSearch(e.target.value)}
+                className="w-full pl-8 pr-3 py-1.5 bg-neutral-900 border border-neutral-700 rounded-xl text-xs text-white placeholder-neutral-500 focus:outline-none focus:border-amber-400 font-mono-numbers"
+              />
+              {prizeSearch && (
+                <button
+                  onClick={() => setPrizeSearch('')}
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-neutral-400 hover:text-white text-xs"
+                >
+                  ✕
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Responsive Prize Cards Grid */}
+          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-2.5 sm:gap-3 max-h-[460px] overflow-y-auto pr-1">
+            {filteredPublicPrizes.map((p) => {
+              const isIPhone = p.prizeName.toLowerCase().includes('iphone');
+              return (
+                <div
+                  key={p.serial}
+                  className="bg-[#0e0e14] border border-amber-500/30 hover:border-amber-400/70 rounded-xl p-3 flex flex-col justify-between transition-all duration-200 shadow-md hover:shadow-amber-500/10 group"
+                >
+                  <div>
+                    <div className="flex items-center justify-between gap-1 mb-2">
+                      <div className="flex items-center gap-1.5">
+                        {isIPhone ? (
+                          <Smartphone className="w-3.5 h-3.5 text-amber-300 shrink-0" />
+                        ) : (
+                          <Banknote className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                        )}
+                        <span className="text-[10px] font-mono-numbers font-bold text-amber-300">
+                          {p.serial}
+                        </span>
+                      </div>
+                      <span className="text-[9px] uppercase px-1.5 py-0.5 rounded bg-black/60 border border-neutral-800 text-neutral-400 font-cinzel">
+                        {isIPhone ? 'iPhone' : 'Cash'}
+                      </span>
+                    </div>
+                    <div className="text-xs sm:text-sm font-bold text-gold-bright font-cinzel leading-tight mb-1">
+                      {p.prizeName}
+                    </div>
+                    {p.customNote && (
+                      <div className="text-[10px] text-neutral-400 italic mb-2 line-clamp-1">
+                        "{p.customNote}"
+                      </div>
+                    )}
+                  </div>
+                  <div className="pt-2 border-t border-neutral-800/80 mt-2 flex items-center justify-between text-[9.5px]">
+                    <span className="text-neutral-500 font-cinzel">Status:</span>
+                    <span
+                      className={
+                        p.isOpened
+                          ? 'text-purple-300 font-semibold'
+                          : p.isClaimed
+                          ? 'text-blue-300 font-semibold'
+                          : 'text-emerald-400 font-semibold'
+                      }
+                    >
+                      {p.isOpened ? 'Opened' : p.isClaimed ? 'Claimed' : 'Available'}
+                    </span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </section>
       )}
 
       {/* =========================================================================
@@ -411,7 +563,7 @@ export const AvailableBoxGrid: React.FC<AvailableBoxGridProps> = ({
                   : 'text-neutral-400 hover:text-white'
               }`}
             >
-              All Inventory (15,051)
+              All Inventory ({totalInventory.toLocaleString()})
             </button>
             <button
               onClick={() => {

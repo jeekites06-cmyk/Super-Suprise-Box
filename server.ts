@@ -1,12 +1,39 @@
+import dotenv from 'dotenv';
+dotenv.config();
+
 import express, { Request, Response } from 'express';
 import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
+import { Pool } from 'pg';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+// Initialize Neon PostgreSQL connection pool
+let neonPool: Pool | null = null;
+let neonConnected = false;
+let neonHostSanitized = 'none';
+
+if (process.env.DATABASE_URL) {
+  try {
+    const rawUrl = process.env.DATABASE_URL.trim();
+    const parsed = new URL(rawUrl);
+    neonHostSanitized = parsed.hostname;
+    neonPool = new Pool({
+      connectionString: rawUrl,
+      ssl: { rejectUnauthorized: false },
+      max: 10,
+      idleTimeoutMillis: 30000,
+      connectionTimeoutMillis: 10000,
+    });
+    console.log(`[DATABASE CONFIG] Neon PostgreSQL pool configured for ${neonHostSanitized}`);
+  } catch (err) {
+    console.error('[DATABASE CONFIG] Error parsing DATABASE_URL:', err);
+  }
+}
 
 const app = express();
 const PORT = 3000;
@@ -41,12 +68,13 @@ const WINNING_SERIALS_SET = new Set<string>(WINNING_SERIALS);
 export interface BoxRecord {
   id: number;
   serial: string;
-  status: 'AVAILABLE' | 'CLAIMED' | 'OPENED';
+  status: 'AVAILABLE' | 'CLAIMED' | 'OPENED' | 'RESERVED';
   claimed: boolean;
   claimedBy?: string;
   claimedAt?: string;
   opened?: boolean;
   openedAt?: string;
+  reserved?: boolean;
   result?: 'WINNER' | 'BETTER_LUCK';
   prizeName?: string;
   claimCode?: string;
@@ -67,6 +95,21 @@ export interface CustomerRecord {
   customerNote?: string;
 }
 
+export interface CustomerLinkRecord {
+  id: number;
+  tokenHash: string;
+  tokenPrefix: string;
+  boxId: number;
+  boxSerial: string;
+  status: 'UNUSED' | 'USED' | 'REVOKED';
+  createdAt: string;
+  usedAt?: string | null;
+  revokedAt?: string | null;
+  createdBy: string;
+  note?: string;
+  rawToken: string;
+}
+
 interface StoreSchema {
   batch: {
     id: number;
@@ -83,11 +126,16 @@ interface StoreSchema {
     totalPrizes: number;
     winningSerials: string[];
     winningPrizes?: Record<string, string>;
-    hiddenPrizeCards?: Record<string, boolean>;
-    prizeCustomNotes?: Record<string, string>;
+    hiddenPrizeCards: Record<string, boolean>;
+    prizeCustomNotes: Record<string, string>;
+    isPrizeShowcaseHidden: boolean;
   };
   customers: Record<string, CustomerRecord>;
+  customerLinks?: Record<string, CustomerLinkRecord>;
 }
+
+// Global in-memory map for customer links (keyed by tokenHash)
+const customerLinksMap = new Map<string, CustomerLinkRecord>();
 
 // =========================================================================
 // --- SECURE ADMIN AUTHENTICATION SYSTEM ---
@@ -194,6 +242,9 @@ let storeData: StoreSchema = {
     totalPrizes: TOTAL_WINNING_PRIZES,
     winningSerials: WINNING_SERIALS,
     winningPrizes: WINNING_PRIZE_MAP,
+    hiddenPrizeCards: {},
+    prizeCustomNotes: {},
+    isPrizeShowcaseHidden: false,
   },
   customers: {},
 };
@@ -203,39 +254,152 @@ function formatSerial(num: number): string {
 }
 
 // Initialize persistent 15,051 box records
-function initDatabase() {
+async function initDatabase(): Promise<void> {
   if (!fs.existsSync(DATA_DIR)) {
     fs.mkdirSync(DATA_DIR, { recursive: true });
   }
 
-  // 1. Synchronize store.json with the EXACT 100 winning serial numbers and prize mappings
-  let shouldSaveStore = false;
+  // 1. Synchronize store defaults
   if (fs.existsSync(STORE_FILE)) {
     try {
       const raw = fs.readFileSync(STORE_FILE, 'utf-8');
       storeData = JSON.parse(raw);
-      storeData.batch.winningSerials = WINNING_SERIALS;
-      storeData.batch.winningPrizes = WINNING_PRIZE_MAP;
-      storeData.batch.winnersPerBatch = TOTAL_WINNING_PRIZES;
-      storeData.batch.totalPrizes = TOTAL_WINNING_PRIZES;
-      storeData.batch.prize = 'Apple iPhone 17 Pro Max & High Cash Rewards (100 Winning Prizes)';
-      storeData.batch.prizeDescription = '100 Winning Boxes: 4 iPhones & 96 Cash Prizes (up to ₹30,000 Cash)';
-      storeData.batch.hiddenPrizeCards = storeData.batch.hiddenPrizeCards || {};
-      storeData.batch.prizeCustomNotes = storeData.batch.prizeCustomNotes || {};
-      shouldSaveStore = true;
     } catch (e) {
       console.error('Error reading store.json, using default:', e);
-      shouldSaveStore = true;
     }
-  } else {
-    shouldSaveStore = true;
+  }
+  storeData.batch.winningSerials = WINNING_SERIALS;
+  storeData.batch.winningPrizes = WINNING_PRIZE_MAP;
+  storeData.batch.winnersPerBatch = TOTAL_WINNING_PRIZES;
+  storeData.batch.totalPrizes = TOTAL_WINNING_PRIZES;
+  storeData.batch.prize = 'Apple iPhone 17 Pro Max & High Cash Rewards (100 Winning Prizes)';
+  storeData.batch.prizeDescription = '100 Winning Boxes: 4 iPhones & 96 Cash Prizes (up to ₹30,000 Cash)';
+  storeData.batch.hiddenPrizeCards = storeData.batch.hiddenPrizeCards || {};
+  storeData.batch.prizeCustomNotes = storeData.batch.prizeCustomNotes || {};
+  storeData.batch.isPrizeShowcaseHidden = typeof storeData.batch.isPrizeShowcaseHidden === 'boolean' ? storeData.batch.isPrizeShowcaseHidden : false;
+
+  // 2. Authoritative load from Neon PostgreSQL if available
+  if (neonPool) {
+    try {
+      console.log('[DATABASE] Connecting to Neon PostgreSQL...');
+      const client = await neonPool.connect();
+      try {
+        const countRes = await client.query('SELECT count(*)::int as count FROM public.boxes;');
+        const count = countRes.rows[0]?.count || 0;
+        console.log(`[DATABASE] Connected to Neon! Found ${count} boxes in public.boxes.`);
+
+        if (count > 0) {
+          const boxesRes = await client.query(`
+            SELECT id, serial, status, claimed, claimed_by, claimed_at, opened, opened_at, result, prize_name, claim_code, is_hidden
+            FROM public.boxes ORDER BY id ASC
+          `);
+          boxesMap.clear();
+          for (const b of boxesRes.rows) {
+            boxesMap.set(b.serial, {
+              id: b.id,
+              serial: b.serial,
+              status: b.status,
+              claimed: !!b.claimed,
+              claimedBy: b.claimed_by || undefined,
+              claimedAt: b.claimed_at ? new Date(b.claimed_at).toISOString() : undefined,
+              opened: !!b.opened,
+              openedAt: b.opened_at ? new Date(b.opened_at).toISOString() : undefined,
+              result: b.result || undefined,
+              prizeName: b.prize_name || undefined,
+              claimCode: b.claim_code || undefined,
+              isHidden: !!b.is_hidden,
+            });
+          }
+
+          // Load admin settings
+          const settingsRes = await client.query('SELECT key, value FROM public.admin_settings;');
+          for (const s of settingsRes.rows) {
+            if (s.key === 'hiddenPrizeCards') {
+              try { storeData.batch.hiddenPrizeCards = JSON.parse(s.value); } catch (_) {}
+            } else if (s.key === 'prizeCustomNotes') {
+              try { storeData.batch.prizeCustomNotes = JSON.parse(s.value); } catch (_) {}
+            } else if (s.key === 'isPrizeShowcaseHidden') {
+              storeData.batch.isPrizeShowcaseHidden = s.value === 'true' || s.value === true;
+            }
+          }
+
+          // Authoritatively load prize card visibility and custom notes from public.prizes table
+          try {
+            const prizesDbRes = await client.query('SELECT serial, prize_name, is_card_hidden, custom_note FROM public.prizes;');
+            for (const pr of prizesDbRes.rows) {
+              storeData.batch.hiddenPrizeCards[pr.serial] = !!pr.is_card_hidden;
+              if (pr.custom_note) {
+                storeData.batch.prizeCustomNotes[pr.serial] = pr.custom_note;
+              }
+            }
+          } catch (prizesErr) {
+            console.warn('[DATABASE] Could not load from public.prizes, using admin_settings:', prizesErr);
+          }
+
+          // Load customers
+          const custRes = await client.query('SELECT * FROM public.customers;');
+          for (const c of custRes.rows) {
+            storeData.customers[c.token] = {
+              token: c.token,
+              hasClaimed: !!c.has_claimed,
+              assignedBox: c.assigned_box,
+              batchId: c.batch_id,
+              opened: !!c.opened,
+              used: !!c.used,
+              openedAt: c.opened_at ? new Date(c.opened_at).toISOString() : undefined,
+              result: c.result || undefined,
+              prizeName: c.prize_name || undefined,
+              claimCode: c.claim_code || undefined,
+              customerNote: c.customer_note || undefined,
+            };
+          }
+
+          // Load customer links from Neon
+          try {
+            const linksDbRes = await client.query('SELECT * FROM public.customer_links ORDER BY created_at DESC;');
+            customerLinksMap.clear();
+            storeData.customerLinks = storeData.customerLinks || {};
+            for (const row of linksDbRes.rows) {
+              const linkRec: CustomerLinkRecord = {
+                id: row.id,
+                tokenHash: row.token_hash,
+                tokenPrefix: row.token_prefix,
+                boxId: row.box_id,
+                boxSerial: row.box_serial,
+                status: row.status,
+                createdAt: row.created_at ? new Date(row.created_at).toISOString() : new Date().toISOString(),
+                usedAt: row.used_at ? new Date(row.used_at).toISOString() : null,
+                revokedAt: row.revoked_at ? new Date(row.revoked_at).toISOString() : null,
+                createdBy: row.created_by || 'admin',
+                note: row.note || '',
+                rawToken: row.raw_token,
+              };
+              customerLinksMap.set(linkRec.tokenHash, linkRec);
+              storeData.customerLinks[linkRec.tokenHash] = linkRec;
+            }
+            console.log(`[DATABASE] Loaded ${customerLinksMap.size} customer links from Neon.`);
+          } catch (linksErr) {
+            console.warn('[DATABASE] Could not load customer_links from Neon:', linksErr);
+          }
+
+          neonConnected = true;
+          console.log(`[DATABASE SUCCESS] Authoritative state loaded from Neon PostgreSQL: ${boxesMap.size} boxes, ${custRes.rows.length} customers, ${customerLinksMap.size} customer links.`);
+
+          // Synchronize local JSON backup replica
+          saveBoxesToDisk();
+          saveStoreToDisk();
+          return;
+        }
+      } finally {
+        client.release();
+      }
+    } catch (neonErr) {
+      console.error('[DATABASE] Neon PostgreSQL initialization error, falling back to JSON:', neonErr);
+      neonConnected = false;
+    }
   }
 
-  if (shouldSaveStore) {
-    saveStoreToDisk();
-  }
-
-  // 2. Load existing records and generate any missing serial-number records without duplicating or overwriting status
+  // 3. Fallback: Load from local JSON files
   if (fs.existsSync(BOXES_FILE)) {
     try {
       const raw = fs.readFileSync(BOXES_FILE, 'utf-8');
@@ -297,6 +461,15 @@ function initDatabase() {
   } else {
     console.log(`All ${boxesMap.size} box records verified intact.`);
   }
+
+  if (storeData.customerLinks) {
+    customerLinksMap.clear();
+    for (const link of Object.values(storeData.customerLinks)) {
+      customerLinksMap.set(link.tokenHash, link);
+    }
+  }
+
+  saveStoreToDisk();
 }
 
 // Atomic file write using temporary file + rename to prevent race conditions during reads
@@ -320,9 +493,6 @@ function saveStoreToDisk() {
     console.error('Error saving store to disk:', err);
   }
 }
-
-// Initialize on startup
-initDatabase();
 
 // --- API ROUTES ---
 
@@ -389,10 +559,11 @@ const handleGetPublicBoxes = (req: Request, res: Response): void => {
   const statusFilter = ((req.query.status as string) || (req.query.filter as string) || 'all').toLowerCase();
 
   // Authoritative global counts across the entire persistent inventory
+  const globalTotalCount = boxesMap.size;
   let globalAvailableCount = 0;
   let globalOpenedCount = 0;
   let globalClaimedCount = 0;
-  let globalReservedWinningCount = 0;
+  let globalReservedCount = 0;
   let globalHiddenCount = 0;
 
   for (const box of boxesMap.values()) {
@@ -400,7 +571,9 @@ const handleGetPublicBoxes = (req: Request, res: Response): void => {
       globalHiddenCount++;
       continue;
     }
-    if (box.status === 'OPENED' || box.opened) {
+    if (box.status === 'RESERVED' || box.reserved) {
+      globalReservedCount++;
+    } else if (box.status === 'OPENED' || box.opened) {
       globalOpenedCount++;
     } else if (box.status === 'CLAIMED' || box.claimed) {
       globalClaimedCount++;
@@ -469,6 +642,7 @@ const handleGetPublicBoxes = (req: Request, res: Response): void => {
 
   res.json({
     boxes: pagedBoxes,
+    totalInventory: globalTotalCount,
     totalAvailable: globalAvailableCount,
     totalBoxesCount: totalFiltered,
     page,
@@ -476,11 +650,13 @@ const handleGetPublicBoxes = (req: Request, res: Response): void => {
     limit,
     batchStart: storeData.batch.startSerial,
     batchEnd: storeData.batch.endSerial,
-    totalBatchBoxes: TOTAL_BOXES,
+    totalBatchBoxes: globalTotalCount,
     openedCount: globalOpenedCount,
     claimedCount: globalClaimedCount,
-    reservedWinningCount: globalReservedWinningCount,
-    totalUnavailable: globalOpenedCount + globalClaimedCount + globalReservedWinningCount,
+    reservedCount: globalReservedCount,
+    reservedWinningCount: globalReservedCount,
+    hiddenCount: globalHiddenCount,
+    totalUnavailable: globalOpenedCount + globalClaimedCount + globalReservedCount + globalHiddenCount,
   });
 };
 app.get('/api/boxes/available', handleGetPublicBoxes);
@@ -543,7 +719,10 @@ app.get('/api/inventory/diagnostic', (_req: Request, res: Response): void => {
 
   res.json({
     success: true,
-    authoritativeSourceOfTruth: 'data/boxes.json',
+    databaseBackend: neonConnected ? 'Neon PostgreSQL (neondb)' : 'Local JSON Storage',
+    databaseConnectionStatus: neonConnected ? 'CONNECTED' : 'STANDBY',
+    authoritativeSourceOfTruth: neonConnected ? 'Neon PostgreSQL public.boxes' : 'data/boxes.json',
+    neonHost: neonHostSanitized,
     expectedSerialNumbers: TOTAL_BOXES,
     totalRecords: totalBoxRecords,
     uniqueSerialNumbers: uniqueSerials.size,
@@ -581,7 +760,7 @@ app.get('/api/inventory/diagnostic', (_req: Request, res: Response): void => {
     startSerial: storeData.batch.startSerial,
     endSerial: storeData.batch.endSerial,
     prizeDistribution,
-    databaseFile: BOXES_FILE,
+    backupFile: BOXES_FILE,
   });
 });
 
@@ -641,6 +820,7 @@ app.get('/api/admin/stats', requireAdminAuth, (_req: Request, res: Response): vo
   let hiddenBoxes = 0;
   let claimedBoxes = 0;
   let openedBoxes = 0;
+  let reservedBoxes = 0;
   let winningBoxes = 0;
   let hiddenWinningBoxes = 0;
 
@@ -652,7 +832,9 @@ app.get('/api/admin/stats', requireAdminAuth, (_req: Request, res: Response): vo
     }
     if (box.isHidden) hiddenBoxes++;
 
-    if (box.status === 'OPENED' || box.opened) {
+    if (box.status === 'RESERVED' || box.reserved) {
+      reservedBoxes++;
+    } else if (box.status === 'OPENED' || box.opened) {
       openedBoxes++;
       claimedBoxes++;
     } else if (box.status === 'CLAIMED' || box.claimed) {
@@ -671,7 +853,7 @@ app.get('/api/admin/stats', requireAdminAuth, (_req: Request, res: Response): vo
     success: true,
     totalBoxes: boxesMap.size,
     availableBoxes,
-    reservedBoxes: 0,
+    reservedBoxes,
     hiddenBoxes,
     claimedBoxes,
     openedBoxes,
@@ -800,7 +982,19 @@ app.post('/api/admin/boxes/visibility', requireAdminAuth, async (req: Request, r
       }
     }
 
-    // Persist immediately and atomically to boxes.json
+    // Persist immediately to Neon PostgreSQL
+    if (neonPool && updatedSerials.length > 0) {
+      try {
+        await neonPool.query(
+          'UPDATE public.boxes SET is_hidden = $1, updated_at = NOW() WHERE serial = ANY($2::varchar[])',
+          [isHidden, updatedSerials]
+        );
+      } catch (dbErr) {
+        console.error('[DATABASE ERROR] Failed to update box visibility in Neon:', dbErr);
+      }
+    }
+
+    // Persist immediately and atomically to boxes.json backup
     saveBoxesToDisk();
 
     console.log(`[ADMIN ACTION] Box visibility updated: ${updatedSerials.length} boxes set isHidden=${isHidden}`);
@@ -847,7 +1041,47 @@ app.get('/api/admin/prizes', requireAdminAuth, (_req: Request, res: Response): v
     success: true,
     totalPrizes: prizesList.length,
     prizes: prizesList,
+    isShowcaseHidden: !!storeData.batch.isPrizeShowcaseHidden,
   });
+});
+
+// H1. Admin Master Toggle: Hide/Unhide the Entire Winning Prizes Showcase
+app.post('/api/admin/prizes/showcase-visibility', requireAdminAuth, async (req: Request, res: Response): Promise<void> => {
+  const { isHidden } = req.body;
+  if (typeof isHidden !== 'boolean') {
+    res.status(400).json({ error: 'isHidden boolean parameter required.' });
+    return;
+  }
+
+  const releaseLock = await dbTransactionLock.acquire();
+  try {
+    storeData.batch.isPrizeShowcaseHidden = isHidden;
+
+    if (neonPool) {
+      try {
+        await neonPool.query(
+          `INSERT INTO public.admin_settings (key, value, updated_at)
+           VALUES ('isPrizeShowcaseHidden', $1, NOW())
+           ON CONFLICT (key) DO UPDATE SET value = $1, updated_at = NOW()`,
+          [isHidden.toString()]
+        );
+      } catch (err) {
+        console.error('[DATABASE ERROR] Failed to persist showcase visibility to Neon:', err);
+      }
+    }
+
+    saveStoreToDisk();
+
+    console.log(`[ADMIN ACTION] Public Prize Showcase visibility set to isHidden=${isHidden}`);
+
+    res.json({
+      success: true,
+      isShowcaseHidden: isHidden,
+      message: `Public Winning Prizes Showcase is now ${isHidden ? 'HIDDEN' : 'VISIBLE'} on the public website.`,
+    });
+  } finally {
+    releaseLock();
+  }
 });
 
 // H. Admin Hide/Unhide Prize Display Cards (without changing winners)
@@ -866,8 +1100,25 @@ app.post('/api/admin/prizes/visibility', requireAdminAuth, async (req: Request, 
 
   const releaseLock = await dbTransactionLock.acquire();
   try {
-    storeData.batch.hiddenPrizeCards = storeData.batch.hiddenPrizeCards || {};
     storeData.batch.hiddenPrizeCards[cleanSerial] = isHidden;
+
+    if (neonPool) {
+      try {
+        await neonPool.query(
+          `UPDATE public.prizes SET is_card_hidden = $1, updated_at = NOW() WHERE serial = $2`,
+          [isHidden, cleanSerial]
+        );
+        await neonPool.query(
+          `INSERT INTO public.admin_settings (key, value, updated_at)
+           VALUES ('hiddenPrizeCards', $1, NOW())
+           ON CONFLICT (key) DO UPDATE SET value = $1, updated_at = NOW()`,
+          [JSON.stringify(storeData.batch.hiddenPrizeCards)]
+        );
+      } catch (err) {
+        console.error('[DATABASE ERROR] Failed to persist prize card visibility to Neon:', err);
+      }
+    }
+
     saveStoreToDisk();
 
     console.log(`[ADMIN ACTION] Prize card for ${cleanSerial} set isCardHidden=${isHidden}`);
@@ -899,8 +1150,26 @@ app.post('/api/admin/prizes/update-display', requireAdminAuth, async (req: Reque
 
   const releaseLock = await dbTransactionLock.acquire();
   try {
-    storeData.batch.prizeCustomNotes = storeData.batch.prizeCustomNotes || {};
-    storeData.batch.prizeCustomNotes[cleanSerial] = typeof customNote === 'string' ? customNote.trim() : '';
+    const note = typeof customNote === 'string' ? customNote.trim() : '';
+    storeData.batch.prizeCustomNotes[cleanSerial] = note;
+
+    if (neonPool) {
+      try {
+        await neonPool.query(
+          `UPDATE public.prizes SET custom_note = $1, updated_at = NOW() WHERE serial = $2`,
+          [note, cleanSerial]
+        );
+        await neonPool.query(
+          `INSERT INTO public.admin_settings (key, value, updated_at)
+           VALUES ('prizeCustomNotes', $1, NOW())
+           ON CONFLICT (key) DO UPDATE SET value = $1, updated_at = NOW()`,
+          [JSON.stringify(storeData.batch.prizeCustomNotes)]
+        );
+      } catch (err) {
+        console.error('[DATABASE ERROR] Failed to persist prize custom notes to Neon:', err);
+      }
+    }
+
     saveStoreToDisk();
 
     console.log(`[ADMIN ACTION] Display note for prize ${cleanSerial} updated: "${storeData.batch.prizeCustomNotes[cleanSerial]}"`);
@@ -914,6 +1183,340 @@ app.post('/api/admin/prizes/update-display', requireAdminAuth, async (req: Reque
   } finally {
     releaseLock();
   }
+});
+
+// J. Public Winning Prizes Endpoint - STRICT CONFIDENTIALITY ENFORCED
+// Customers must NEVER see which serial numbers are winning boxes or what prizes are assigned to them.
+// Individual winning serial numbers and prize mappings are NEVER exposed to unauthenticated users.
+app.get(['/api/prizes', '/api/prizes/public', '/api/batch/prizes'], (_req: Request, res: Response): void => {
+  res.json({
+    success: true,
+    totalPrizes: 100,
+    prizes: [],
+    message: 'Winning prize allocations are strictly confidential until customer opens their assigned box.',
+  });
+});
+
+// =========================================================================
+// --- K. SECURE ADMIN-CONTROLLED ONE-TIME CUSTOMER LINK SYSTEM ---
+// =========================================================================
+
+// 1. Admin List Links (Paginated, Searchable, Filterable)
+app.get('/api/admin/links', requireAdminAuth, (req: Request, res: Response): void => {
+  const page = Math.max(1, parseInt((req.query.page as string) || '1', 10));
+  const limit = Math.min(200, Math.max(10, parseInt((req.query.limit as string) || '50', 10)));
+  const search = ((req.query.search as string) || '').trim().toUpperCase();
+  const statusFilter = ((req.query.status as string) || 'all').toUpperCase();
+
+  const reqProto = req.headers['x-forwarded-proto'] || req.protocol || 'http';
+  const reqHost = req.headers['x-forwarded-host'] || req.headers.host || 'localhost:3000';
+  const baseUrl = `${reqProto}://${reqHost}`;
+
+  let totalUnused = 0;
+  let totalUsed = 0;
+  let totalRevoked = 0;
+
+  const allLinks: (CustomerLinkRecord & { url: string; isWinner?: boolean })[] = [];
+
+  for (const l of customerLinksMap.values()) {
+    if (l.status === 'UNUSED') totalUnused++;
+    else if (l.status === 'USED') totalUsed++;
+    else if (l.status === 'REVOKED') totalRevoked++;
+
+    if (statusFilter !== 'ALL' && l.status !== statusFilter) {
+      continue;
+    }
+    if (search && !l.boxSerial.includes(search) && !(l.note && l.note.toUpperCase().includes(search))) {
+      continue;
+    }
+
+    allLinks.push({
+      ...l,
+      url: `${baseUrl}/?token=${l.rawToken}`,
+      isWinner: WINNING_SERIALS_SET.has(l.boxSerial),
+    });
+  }
+
+  // Sort newest first
+  allLinks.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+
+  const totalFiltered = allLinks.length;
+  const totalPages = Math.ceil(totalFiltered / limit) || 1;
+  const startIndex = (page - 1) * limit;
+  const pagedLinks = allLinks.slice(startIndex, startIndex + limit);
+
+  res.json({
+    success: true,
+    links: pagedLinks,
+    totalCount: totalFiltered,
+    page,
+    totalPages,
+    limit,
+    stats: {
+      total: customerLinksMap.size,
+      unused: totalUnused,
+      used: totalUsed,
+      revoked: totalRevoked,
+    },
+  });
+});
+
+// 2. Admin Generate One-Time Link for a Specific Box
+app.post('/api/admin/links/generate', requireAdminAuth, async (req: Request, res: Response): Promise<void> => {
+  const { boxSerial, note } = req.body;
+  if (!boxSerial || typeof boxSerial !== 'string') {
+    res.status(400).json({ error: 'Box serial is required.' });
+    return;
+  }
+
+  const cleanSerial = boxSerial.trim().toUpperCase();
+  const box = boxesMap.get(cleanSerial);
+  if (!box) {
+    res.status(404).json({ error: `Box ${cleanSerial} does not exist.` });
+    return;
+  }
+
+  if (box.status === 'OPENED' || box.opened) {
+    res.status(400).json({ error: `Box ${cleanSerial} has already been opened.` });
+    return;
+  }
+  if (box.status === 'CLAIMED' || box.claimed) {
+    res.status(400).json({ error: `Box ${cleanSerial} is already claimed.` });
+    return;
+  }
+
+  const reqProto = req.headers['x-forwarded-proto'] || req.protocol || 'http';
+  const reqHost = req.headers['x-forwarded-host'] || req.headers.host || 'localhost:3000';
+  const baseUrl = `${reqProto}://${reqHost}`;
+
+  // Check if box already has an active UNUSED link
+  for (const existing of customerLinksMap.values()) {
+    if (existing.boxSerial === cleanSerial && existing.status === 'UNUSED') {
+      const existingUrl = `${baseUrl}/?token=${existing.rawToken}`;
+      res.json({
+        success: true,
+        alreadyExists: true,
+        message: `An active unused link already exists for Box ${cleanSerial}.`,
+        url: existingUrl,
+        rawToken: existing.rawToken,
+        link: {
+          ...existing,
+          url: existingUrl,
+        },
+      });
+      return;
+    }
+  }
+
+  // Generate cryptographically secure token (URL-safe base64url, 192 bits of entropy)
+  const rawToken = 'SSB_' + crypto.randomBytes(24).toString('base64url');
+  const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
+  const tokenPrefix = rawToken.substring(0, 8);
+  const now = new Date().toISOString();
+
+  let linkId = Date.now();
+  if (neonPool) {
+    try {
+      const insRes = await neonPool.query(`
+        INSERT INTO public.customer_links (token_hash, token_prefix, box_id, box_serial, status, created_at, created_by, note, raw_token)
+        VALUES ($1, $2, $3, $4, 'UNUSED', NOW(), 'admin', $5, $6)
+        RETURNING id, created_at;
+      `, [tokenHash, tokenPrefix, box.id, cleanSerial, note || null, rawToken]);
+      if (insRes.rows.length > 0) {
+        linkId = insRes.rows[0].id;
+      }
+    } catch (dbErr) {
+      console.error('[DATABASE ERROR] Failed to insert customer link:', dbErr);
+      res.status(500).json({ error: 'Database error creating customer link.' });
+      return;
+    }
+  }
+
+  const linkRecord: CustomerLinkRecord = {
+    id: linkId,
+    tokenHash,
+    tokenPrefix,
+    boxId: box.id,
+    boxSerial: cleanSerial,
+    status: 'UNUSED',
+    createdAt: now,
+    usedAt: null,
+    revokedAt: null,
+    createdBy: 'admin',
+    note: note || '',
+    rawToken,
+  };
+
+  customerLinksMap.set(tokenHash, linkRecord);
+  storeData.customerLinks = storeData.customerLinks || {};
+  storeData.customerLinks[tokenHash] = linkRecord;
+  saveStoreToDisk();
+
+  const generatedUrl = `${baseUrl}/?token=${rawToken}`;
+  res.json({
+    success: true,
+    url: generatedUrl,
+    rawToken,
+    link: {
+      ...linkRecord,
+      url: generatedUrl,
+    },
+  });
+});
+
+// 3. Admin Revoke Unused Link
+app.post('/api/admin/links/revoke', requireAdminAuth, async (req: Request, res: Response): Promise<void> => {
+  const { linkId, tokenHash } = req.body;
+  let targetLink: CustomerLinkRecord | undefined;
+  if (tokenHash) {
+    targetLink = customerLinksMap.get(tokenHash);
+  } else if (linkId) {
+    for (const l of customerLinksMap.values()) {
+      if (l.id === Number(linkId)) {
+        targetLink = l;
+        break;
+      }
+    }
+  }
+
+  if (!targetLink) {
+    res.status(404).json({ error: 'Customer link not found.' });
+    return;
+  }
+
+  if (targetLink.status === 'USED') {
+    res.status(400).json({ error: 'Cannot revoke a link that has already been used.' });
+    return;
+  }
+
+  const now = new Date().toISOString();
+  targetLink.status = 'REVOKED';
+  targetLink.revokedAt = now;
+
+  if (neonPool) {
+    try {
+      await neonPool.query(`
+        UPDATE public.customer_links
+        SET status = 'REVOKED', revoked_at = NOW()
+        WHERE token_hash = $1
+      `, [targetLink.tokenHash]);
+    } catch (dbErr) {
+      console.error('[DATABASE ERROR] Failed to revoke customer link:', dbErr);
+    }
+  }
+
+  saveStoreToDisk();
+
+  res.json({
+    success: true,
+    message: `Link for Box ${targetLink.boxSerial} has been revoked.`,
+    link: targetLink,
+  });
+});
+
+app.post('/api/admin/links/replace', requireAdminAuth, async (req: Request, res: Response): Promise<void> => {
+  const { note } = req.body;
+  let boxSerial = typeof req.body.boxSerial === 'string' ? req.body.boxSerial : undefined;
+  const targetLinkId = req.body.linkId;
+
+  if (!boxSerial && targetLinkId) {
+    for (const l of customerLinksMap.values()) {
+      if (l.id === Number(targetLinkId)) {
+        boxSerial = l.boxSerial;
+        break;
+      }
+    }
+  }
+
+  if (!boxSerial || typeof boxSerial !== 'string') {
+    res.status(400).json({ error: 'Box serial or linkId is required.' });
+    return;
+  }
+
+  const cleanSerial = boxSerial.trim().toUpperCase();
+  const box = boxesMap.get(cleanSerial);
+  if (!box) {
+    res.status(404).json({ error: `Box ${cleanSerial} does not exist.` });
+    return;
+  }
+
+  if (box.status === 'OPENED' || box.opened) {
+    res.status(400).json({ error: `Box ${cleanSerial} has already been opened.` });
+    return;
+  }
+
+  const now = new Date().toISOString();
+  // Revoke any existing UNUSED links for this box
+  for (const existing of customerLinksMap.values()) {
+    if (existing.boxSerial === cleanSerial && existing.status === 'UNUSED') {
+      existing.status = 'REVOKED';
+      existing.revokedAt = now;
+      if (neonPool) {
+        neonPool.query(`UPDATE public.customer_links SET status = 'REVOKED', revoked_at = NOW() WHERE token_hash = $1`, [existing.tokenHash]).catch(console.error);
+      }
+    }
+  }
+
+  // Generate fresh replacement link
+  const rawToken = 'SSB_' + crypto.randomBytes(24).toString('base64url');
+  const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
+  const tokenPrefix = rawToken.substring(0, 8);
+
+  let linkId = Date.now();
+  if (neonPool) {
+    try {
+      const insRes = await neonPool.query(`
+        INSERT INTO public.customer_links (token_hash, token_prefix, box_id, box_serial, status, created_at, created_by, note, raw_token)
+        VALUES ($1, $2, $3, $4, 'UNUSED', NOW(), 'admin', $5, $6)
+        RETURNING id;
+      `, [tokenHash, tokenPrefix, box.id, cleanSerial, note || 'Replacement link', rawToken]);
+      if (insRes.rows.length > 0) {
+        linkId = insRes.rows[0].id;
+      }
+    } catch (dbErr) {
+      console.error('[DATABASE ERROR] Failed to create replacement customer link:', dbErr);
+    }
+  }
+
+  const linkRecord: CustomerLinkRecord = {
+    id: linkId,
+    tokenHash,
+    tokenPrefix,
+    boxId: box.id,
+    boxSerial: cleanSerial,
+    status: 'UNUSED',
+    createdAt: now,
+    usedAt: null,
+    revokedAt: null,
+    createdBy: 'admin',
+    note: note || 'Replacement link',
+    rawToken,
+  };
+
+  customerLinksMap.set(tokenHash, linkRecord);
+  storeData.customerLinks = storeData.customerLinks || {};
+  storeData.customerLinks[tokenHash] = linkRecord;
+  saveStoreToDisk();
+
+  const reqProto = req.headers['x-forwarded-proto'] || req.protocol || 'http';
+  const reqHost = req.headers['x-forwarded-host'] || req.headers.host || 'localhost:3000';
+  const baseUrl = `${reqProto}://${reqHost}`;
+
+  const replacementUrl = `${baseUrl}/?token=${rawToken}`;
+  const responseLink = {
+    ...linkRecord,
+    url: replacementUrl,
+    rawToken,
+  };
+
+  res.json({
+    success: true,
+    message: `New replacement link generated for Box ${cleanSerial}.`,
+    url: replacementUrl,
+    rawToken,
+    link: responseLink,
+    newLink: responseLink,
+  });
 });
 
 // 3. Customer Session: verify link and enforce one-time use
@@ -942,6 +1545,55 @@ app.get('/api/customer/session', (req: Request, res: Response): void => {
     return;
   }
 
+  // 1. Check if token matches a secure admin-generated link (lookup by SHA-256 hash)
+  const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+  const link = customerLinksMap.get(tokenHash);
+
+  if (link) {
+    const box = boxesMap.get(link.boxSerial);
+
+    if (link.status === 'REVOKED') {
+      res.status(403).json({
+        valid: false,
+        revoked: true,
+        error: 'THIS LINK HAS BEEN REVOKED BY THE ADMINISTRATOR.',
+      });
+      return;
+    }
+
+    if (link.status === 'USED' || box?.opened || box?.status === 'OPENED') {
+      res.json({
+        valid: true,
+        token,
+        hasClaimed: true,
+        assignedBox: link.boxSerial,
+        batchId: 1,
+        opened: true,
+        used: true,
+        alreadyUsed: true,
+        openedAt: link.usedAt || box?.openedAt || new Date().toISOString(),
+        result: box?.result || 'BETTER_LUCK',
+        prizeName: box?.prizeName || null,
+        claimCode: box?.claimCode || null,
+      });
+      return;
+    }
+
+    // Unused valid link: assigned to link.boxSerial!
+    res.json({
+      valid: true,
+      token,
+      hasClaimed: true,
+      assignedBox: link.boxSerial,
+      batchId: 1,
+      opened: false,
+      used: false,
+      alreadyUsed: false,
+    });
+    return;
+  }
+
+  // 2. Fallback check for session in storeData.customers
   let customer = storeData.customers[token];
 
   if (!customer) {
@@ -955,6 +1607,16 @@ app.get('/api/customer/session', (req: Request, res: Response): void => {
       customerNote: `Customer session for ${token}`,
     };
     storeData.customers[token] = customer;
+
+    if (neonPool) {
+      neonPool.query(
+        `INSERT INTO public.customers (token, has_claimed, assigned_box, batch_id, opened, used, customer_note, updated_at)
+         VALUES ($1, FALSE, NULL, 1, FALSE, FALSE, $2, NOW())
+         ON CONFLICT (token) DO NOTHING`,
+        [token, customer.customerNote]
+      ).catch((err) => console.error('[DATABASE ERROR] Failed to record customer session in Neon:', err));
+    }
+
     saveStoreToDisk();
   }
 
@@ -1062,11 +1724,58 @@ app.post('/api/boxes/claim', async (req: Request, res: Response): Promise<void> 
       return;
     }
 
-    // ATOMIC RESERVATION: Mark box as claimed and unavailable to all customers
+    // ATOMIC DATABASE TRANSACTION (Neon PostgreSQL)
+    const nowIso = new Date().toISOString();
+    if (neonPool) {
+      const client = await neonPool.connect();
+      try {
+        await client.query('BEGIN');
+        const dbBoxRes = await client.query(
+          'SELECT status, claimed, is_hidden FROM public.boxes WHERE serial = $1 FOR UPDATE',
+          [cleanSerial]
+        );
+        if (dbBoxRes.rows.length === 0) {
+          await client.query('ROLLBACK');
+          res.status(404).json({ error: `Box ${cleanSerial} does not exist in Batch 1.` });
+          return;
+        }
+        const dbBox = dbBoxRes.rows[0];
+        if (dbBox.is_hidden) {
+          await client.query('ROLLBACK');
+          res.status(403).json({ error: `Box ${cleanSerial} is hidden and not available for selection.` });
+          return;
+        }
+        if (dbBox.claimed || dbBox.status !== 'AVAILABLE') {
+          await client.query('ROLLBACK');
+          res.status(409).json({ error: `Box ${cleanSerial} was just claimed by another customer. Please choose another available box.` });
+          return;
+        }
+
+        await client.query(
+          `UPDATE public.boxes SET status = 'CLAIMED', claimed = TRUE, claimed_by = $1, claimed_at = $2, updated_at = NOW() WHERE serial = $3`,
+          [cleanToken, nowIso, cleanSerial]
+        );
+        await client.query(
+          `INSERT INTO public.customers (token, has_claimed, assigned_box, batch_id, opened, used, updated_at)
+           VALUES ($1, TRUE, $2, 1, FALSE, FALSE, NOW())
+           ON CONFLICT (token) DO UPDATE SET has_claimed = TRUE, assigned_box = $2, updated_at = NOW()`,
+          [cleanToken, cleanSerial]
+        );
+        await client.query('COMMIT');
+      } catch (dbErr) {
+        await client.query('ROLLBACK');
+        console.error('[DATABASE ERROR] Neon transaction failure during box claim:', dbErr);
+        throw dbErr;
+      } finally {
+        client.release();
+      }
+    }
+
+    // ATOMIC RESERVATION: Mark box as claimed in memory and disk backup
     box.status = 'CLAIMED';
     box.claimed = true;
     box.claimedBy = cleanToken;
-    box.claimedAt = new Date().toISOString();
+    box.claimedAt = nowIso;
 
     customer.hasClaimed = true;
     customer.assignedBox = cleanSerial;
@@ -1109,6 +1818,144 @@ app.post('/api/customer/open', async (req: Request, res: Response): Promise<void
   const releaseLock = await dbTransactionLock.acquire();
 
   try {
+    const tokenHash = crypto.createHash('sha256').update(cleanToken).digest('hex');
+    const link = customerLinksMap.get(tokenHash);
+
+    if (link) {
+      if (link.status === 'REVOKED') {
+        res.status(403).json({ error: 'THIS LINK HAS BEEN REVOKED BY THE ADMINISTRATOR.', revoked: true });
+        return;
+      }
+
+      if (link.status === 'USED') {
+        const box = boxesMap.get(link.boxSerial);
+        res.status(403).json({
+          error: 'THIS LINK HAS ALREADY BEEN USED.',
+          alreadyOpened: true,
+          alreadyUsed: true,
+          boxSerial: link.boxSerial,
+          result: box?.result || 'BETTER_LUCK',
+          prizeName: box?.prizeName || null,
+          openedAt: link.usedAt || box?.openedAt,
+        });
+        return;
+      }
+
+      const assignedBoxSerial = link.boxSerial;
+
+      // Prevent box tampering
+      if (boxSerial && boxSerial.trim().toUpperCase() !== assignedBoxSerial) {
+        res.status(403).json({
+          error: `Access Denied: You are assigned to Box ${assignedBoxSerial}. You cannot open a different box.`,
+        });
+        return;
+      }
+
+      // Check if assigned box is already opened
+      const existingBox = boxesMap.get(assignedBoxSerial);
+      if (existingBox && (existingBox.status === 'OPENED' || existingBox.opened)) {
+        link.status = 'USED';
+        link.usedAt = existingBox.openedAt || new Date().toISOString();
+        res.status(403).json({
+          error: 'THIS LINK HAS ALREADY BEEN USED.',
+          alreadyOpened: true,
+          alreadyUsed: true,
+          boxSerial: assignedBoxSerial,
+        });
+        return;
+      }
+
+      const isWinner = WINNING_SERIALS_SET.has(assignedBoxSerial);
+      const now = new Date().toISOString();
+      const result = isWinner ? 'WINNER' : 'BETTER_LUCK';
+      let prizeName: string | null = null;
+      let claimCode: string | null = null;
+
+      if (isWinner) {
+        prizeName = WINNING_PRIZE_MAP[assignedBoxSerial] || 'Apple iPhone 17 Pro';
+        claimCode = `SSB-${assignedBoxSerial}-${Date.now().toString().slice(-6)}`;
+      }
+
+      // ATOMIC TRANSACTION IN NEON POSTGRESQL (Conditional UPDATE on link status)
+      if (neonPool) {
+        const client = await neonPool.connect();
+        try {
+          await client.query('BEGIN');
+
+          // Strict conditional update: must be UNUSED at the moment of update
+          const updateLinkRes = await client.query(
+            `UPDATE public.customer_links
+             SET status = 'USED', used_at = $1
+             WHERE token_hash = $2 AND status = 'UNUSED'
+             RETURNING *;`,
+            [now, tokenHash]
+          );
+
+          if (updateLinkRes.rowCount === 0) {
+            // Simultaneous concurrent request already used this link
+            await client.query('ROLLBACK');
+            res.status(403).json({
+              error: 'THIS LINK HAS ALREADY BEEN USED.',
+              alreadyUsed: true,
+              alreadyOpened: true,
+            });
+            return;
+          }
+
+          // Mark box as opened in public.boxes
+          await client.query(
+            `UPDATE public.boxes
+             SET status = 'OPENED', opened = TRUE, claimed = TRUE,
+                 claimed_by = $1, opened_at = $2, result = $3,
+                 prize_name = $4, claim_code = $5, updated_at = NOW()
+             WHERE serial = $6`,
+            [tokenHash, now, result, prizeName, claimCode, assignedBoxSerial]
+          );
+
+          await client.query('COMMIT');
+        } catch (dbErr) {
+          await client.query('ROLLBACK');
+          console.error('[DATABASE ERROR] Neon transaction failure during open:', dbErr);
+          throw dbErr;
+        } finally {
+          client.release();
+        }
+      }
+
+      // Update in-memory state
+      link.status = 'USED';
+      link.usedAt = now;
+
+      if (existingBox) {
+        existingBox.status = 'OPENED';
+        existingBox.opened = true;
+        existingBox.claimed = true;
+        existingBox.claimedBy = tokenHash;
+        existingBox.openedAt = now;
+        existingBox.result = result;
+        existingBox.prizeName = prizeName || undefined;
+        existingBox.claimCode = claimCode || undefined;
+      }
+
+      saveBoxesToDisk();
+      saveStoreToDisk();
+
+      console.log(`[ONE-TIME LINK OPENED] Box ${assignedBoxSerial} opened via private link. Result: ${result}. Link marked USED.`);
+
+      res.json({
+        success: true,
+        alreadyOpened: false,
+        alreadyUsed: false,
+        boxSerial: assignedBoxSerial,
+        result,
+        prizeName: prizeName || undefined,
+        claimCode: claimCode || undefined,
+        openedAt: now,
+      });
+      return;
+    }
+
+    // 2. Fallback for legacy customer session tokens
     const customer = storeData.customers[cleanToken];
 
     if (!customer) {
@@ -1131,10 +1978,10 @@ app.post('/api/customer/open', async (req: Request, res: Response): Promise<void
       return;
     }
 
-    // ENFORCE ONE-TIME USE: If already opened/used, return permanent saved result
+    // ENFORCE ONE-TIME USE: If already opened/used, return error
     if (customer.opened || customer.used) {
-      res.json({
-        success: true,
+      res.status(403).json({
+        error: 'THIS LINK HAS ALREADY BEEN USED.',
         alreadyOpened: true,
         alreadyUsed: true,
         boxSerial: customer.assignedBox,
@@ -1161,7 +2008,30 @@ app.post('/api/customer/open', async (req: Request, res: Response): Promise<void
       customer.claimCode = `SSB-${assignedBoxSerial}-${Date.now().toString().slice(-6)}`;
     }
 
-    // MARK BOX AS OPENED IN THE PERSISTENT DATABASE
+    // MARK BOX AS OPENED IN NEON POSTGRESQL (TRANSACTION)
+    if (neonPool) {
+      const client = await neonPool.connect();
+      try {
+        await client.query('BEGIN');
+        await client.query(
+          `UPDATE public.boxes SET status = 'OPENED', opened = TRUE, claimed = TRUE, claimed_by = $1, opened_at = $2, result = $3, prize_name = $4, claim_code = $5, updated_at = NOW() WHERE serial = $6`,
+          [cleanToken, now, customer.result, customer.prizeName || null, customer.claimCode || null, assignedBoxSerial]
+        );
+        await client.query(
+          `UPDATE public.customers SET opened = TRUE, used = TRUE, opened_at = $1, result = $2, prize_name = $3, claim_code = $4, updated_at = NOW() WHERE token = $5`,
+          [now, customer.result, customer.prizeName || null, customer.claimCode || null, cleanToken]
+        );
+        await client.query('COMMIT');
+      } catch (dbErr) {
+        await client.query('ROLLBACK');
+        console.error('[DATABASE ERROR] Neon transaction failure during open:', dbErr);
+        throw dbErr;
+      } finally {
+        client.release();
+      }
+    }
+
+    // MARK BOX AS OPENED IN THE PERSISTENT DATABASE CACHE
     const box = boxesMap.get(assignedBoxSerial);
     if (box) {
       box.status = 'OPENED';
@@ -1199,6 +2069,8 @@ app.post('/api/customer/open', async (req: Request, res: Response): Promise<void
 });
 
 async function startServer() {
+  await initDatabase();
+
   const isProduction = process.env.NODE_ENV === 'production';
 
   if (!isProduction) {

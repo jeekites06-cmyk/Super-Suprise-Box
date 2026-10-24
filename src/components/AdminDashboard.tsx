@@ -22,8 +22,15 @@ import {
   Smartphone,
   Banknote,
   SlidersHorizontal,
+  Link as LinkIcon,
+  Copy,
+  MessageCircle,
+  RotateCcw,
+  PlusCircle,
+  Check,
+  Ban,
 } from 'lucide-react';
-import { AdminBoxRecord, AdminStats, AdminPrizeRecord } from '../types/box';
+import { AdminBoxRecord, AdminStats, AdminPrizeRecord, AdminCustomerLink } from '../types/box';
 
 interface AdminDashboardProps {
   onBackToCustomerView: () => void;
@@ -41,8 +48,32 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBackToCustomer
   const [loginError, setLoginError] = useState<string | null>(null);
   const [loginLoading, setLoginLoading] = useState<boolean>(false);
 
-  // Dashboard tab state: 'boxes' | 'prizes'
-  const [activeTab, setActiveTab] = useState<'boxes' | 'prizes'>('boxes');
+  // Dashboard tab state: 'boxes' | 'prizes' | 'links'
+  const [activeTab, setActiveTab] = useState<'boxes' | 'prizes' | 'links'>('boxes');
+
+  // Customer Links state
+  const [links, setLinks] = useState<AdminCustomerLink[]>([]);
+  const [linksTotal, setLinksTotal] = useState<number>(0);
+  const [linksPage, setLinksPage] = useState<number>(1);
+  const [linksTotalPages, setLinksTotalPages] = useState<number>(1);
+  const [linksLimit, setLinksLimit] = useState<number>(50);
+  const [linksSearch, setLinksSearch] = useState<string>('');
+  const [linksStatusFilter, setLinksStatusFilter] = useState<string>('all');
+  const [linksLoading, setLinksLoading] = useState<boolean>(false);
+  const [linksStats, setLinksStats] = useState<{ total: number; unused: number; used: number; revoked: number }>({
+    total: 0,
+    unused: 0,
+    used: 0,
+    revoked: 0,
+  });
+
+  // Link Generator form state
+  const [genBoxSerial, setGenBoxSerial] = useState<string>('');
+  const [genNote, setGenNote] = useState<string>('');
+  const [genLoading, setGenLoading] = useState<boolean>(false);
+  const [copiedLinkId, setCopiedLinkId] = useState<number | null>(null);
+  const [revokingLinkId, setRevokingLinkId] = useState<number | null>(null);
+  const [replacingSerial, setReplacingSerial] = useState<string | null>(null);
 
   // Stats state
   const [stats, setStats] = useState<AdminStats | null>(null);
@@ -62,6 +93,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBackToCustomer
   const [prizes, setPrizes] = useState<AdminPrizeRecord[]>([]);
   const [prizesSearch, setPrizesSearch] = useState<string>('');
   const [prizesLoading, setPrizesLoading] = useState<boolean>(false);
+  const [isShowcaseHidden, setIsShowcaseHidden] = useState<boolean>(false);
+  const [togglingShowcase, setTogglingShowcase] = useState<boolean>(false);
 
   // Action status / Notifications
   const [actionNotice, setActionNotice] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
@@ -181,6 +214,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBackToCustomer
       if (res.ok) {
         const data = await res.json();
         setPrizes(data.prizes);
+        setIsShowcaseHidden(!!data.isShowcaseHidden);
       }
     } catch (err) {
       console.error('Failed to fetch admin prizes:', err);
@@ -190,17 +224,167 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBackToCustomer
     }
   }, [token]);
 
+  // Fetch Customer Links
+  const fetchLinks = useCallback(
+    async (page = 1, search = '', status = 'all') => {
+      if (!token) return;
+      setLinksLoading(true);
+      try {
+        const params = new URLSearchParams();
+        params.set('page', page.toString());
+        params.set('limit', linksLimit.toString());
+        if (search) params.set('search', search);
+        if (status !== 'all') params.set('status', status);
+
+        const res = await fetch(`/api/admin/links?${params.toString()}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (res.ok) {
+          const data = await res.json();
+          setLinks(data.links || []);
+          setLinksTotal(data.totalCount || 0);
+          setLinksTotalPages(data.totalPages || 1);
+          setLinksPage(data.page || 1);
+          if (data.stats) setLinksStats(data.stats);
+        }
+      } catch (err) {
+        console.error('Failed to fetch links:', err);
+      } finally {
+        setLinksLoading(false);
+      }
+    },
+    [token, linksLimit]
+  );
+
+  const handleGenerateLink = async (targetSerial?: string, customNote?: string) => {
+    const serial = (targetSerial || genBoxSerial).trim().toUpperCase();
+    if (!serial) {
+      showNotification('error', 'Please enter a valid box serial (e.g. SS00000001).');
+      return;
+    }
+    if (!token) return;
+    setGenLoading(true);
+    try {
+      const res = await fetch('/api/admin/links/generate', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ boxSerial: serial, note: customNote || genNote }),
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        showNotification(
+          'success',
+          data.alreadyExists
+            ? `Active link already exists for Box ${serial}. Copied to clipboard!`
+            : `Private one-time link generated for Box ${serial}!`
+        );
+        if (data.link?.url) {
+          navigator.clipboard.writeText(data.link.url).catch(() => {});
+        }
+        setGenBoxSerial('');
+        setGenNote('');
+        fetchLinks(1, linksSearch, linksStatusFilter);
+        fetchStats();
+      } else {
+        showNotification('error', data.error || 'Failed to generate link.');
+      }
+    } catch {
+      showNotification('error', 'Network error generating customer link.');
+    } finally {
+      setGenLoading(false);
+    }
+  };
+
+  const handleCopyLink = (link: AdminCustomerLink) => {
+    navigator.clipboard.writeText(link.url);
+    setCopiedLinkId(link.id);
+    showNotification('success', `Copied one-time link for Box ${link.boxSerial} to clipboard!`);
+    setTimeout(() => setCopiedLinkId(null), 2500);
+  };
+
+  const handleShareWhatsApp = (link: AdminCustomerLink) => {
+    const text = `🎉 SUPER SURPRISE BOX - YOUR PRIVATE ONE-TIME LINK\n\nAssigned Box: ${link.boxSerial}\nOpen Link: ${link.url}\n\n⚠️ IMPORTANT: This private link is uniquely assigned to your box and can only be opened once. Once opened, it will permanently lock and cannot be reused. Good luck!`;
+    const waUrl = `https://wa.me/?text=${encodeURIComponent(text)}`;
+    window.open(waUrl, '_blank', 'noopener,noreferrer');
+  };
+
+  const handleRevokeLink = async (link: AdminCustomerLink) => {
+    if (!window.confirm(`Are you sure you want to revoke the unused link for Box ${link.boxSerial}? A revoked link can never be used.`)) {
+      return;
+    }
+    if (!token) return;
+    setRevokingLinkId(link.id);
+    try {
+      const res = await fetch('/api/admin/links/revoke', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ linkId: link.id, tokenHash: link.tokenHash }),
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        showNotification('success', `Link for Box ${link.boxSerial} revoked successfully.`);
+        fetchLinks(linksPage, linksSearch, linksStatusFilter);
+      } else {
+        showNotification('error', data.error || 'Failed to revoke link.');
+      }
+    } catch {
+      showNotification('error', 'Error revoking link.');
+    } finally {
+      setRevokingLinkId(null);
+    }
+  };
+
+  const handleReplaceLink = async (link: AdminCustomerLink) => {
+    if (!window.confirm(`Generate a new replacement link for Box ${link.boxSerial}? Any prior unused link will be permanently revoked.`)) {
+      return;
+    }
+    if (!token) return;
+    setReplacingSerial(link.boxSerial);
+    try {
+      const res = await fetch('/api/admin/links/replace', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ boxSerial: link.boxSerial, note: 'Replacement link' }),
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        showNotification('success', `New replacement link generated for Box ${link.boxSerial}!`);
+        if (data.link?.url) {
+          navigator.clipboard.writeText(data.link.url).catch(() => {});
+        }
+        fetchLinks(linksPage, linksSearch, linksStatusFilter);
+      } else {
+        showNotification('error', data.error || 'Failed to replace link.');
+      }
+    } catch {
+      showNotification('error', 'Error generating replacement link.');
+    } finally {
+      setReplacingSerial(null);
+    }
+  };
+
   // Trigger data fetches on auth
   useEffect(() => {
     if (isAuthenticated) {
       fetchStats();
       if (activeTab === 'boxes') {
         fetchBoxes(boxesPage, boxesLimit, boxesSearch, boxesFilter);
-      } else {
+      } else if (activeTab === 'prizes') {
         fetchPrizes();
+      } else if (activeTab === 'links') {
+        fetchLinks(linksPage, linksSearch, linksStatusFilter);
       }
     }
-  }, [isAuthenticated, activeTab, fetchStats, fetchBoxes, fetchPrizes, boxesPage, boxesLimit, boxesSearch, boxesFilter]);
+  }, [isAuthenticated, activeTab, fetchStats, fetchBoxes, fetchPrizes, fetchLinks, boxesPage, boxesLimit, boxesSearch, boxesFilter, linksPage, linksSearch, linksStatusFilter]);
 
   // Handle Login
   const handleLoginSubmit = async (e: React.FormEvent) => {
@@ -384,13 +568,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBackToCustomer
 
   // Toggle Prize Card Visibility
   const handleTogglePrizeCardVisibility = async (prize: AdminPrizeRecord) => {
-    if (!token) return;
+    if (!token || togglingSerial) return;
     const targetSerial = prize.serial;
     const newIsCardHidden = !prize.isCardHidden;
 
-    setPrizes((prev) =>
-      prev.map((p) => (p.serial === targetSerial ? { ...p, isCardHidden: newIsCardHidden } : p))
-    );
+    setTogglingSerial(targetSerial);
 
     try {
       const res = await fetch('/api/admin/prizes/visibility', {
@@ -404,21 +586,57 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBackToCustomer
 
       const data = await res.json();
       if (res.ok && data.success) {
+        // Backend confirmed success: update state so button flips to Unhide and badge shows CARD HIDDEN
+        setPrizes((prev) =>
+          prev.map((p) => (p.serial === targetSerial ? { ...p, isCardHidden: newIsCardHidden } : p))
+        );
         showNotification(
           'success',
           `Prize card for ${targetSerial} (${prize.prizeName}) is now ${newIsCardHidden ? 'HIDDEN' : 'VISIBLE'}.`
         );
+        fetchStats();
       } else {
-        setPrizes((prev) =>
-          prev.map((p) => (p.serial === targetSerial ? { ...p, isCardHidden: prize.isCardHidden } : p))
-        );
-        showNotification('error', data.error || 'Failed to update prize card visibility.');
+        showNotification('error', data.error || 'Failed to update prize card visibility in database.');
       }
     } catch {
-      setPrizes((prev) =>
-        prev.map((p) => (p.serial === targetSerial ? { ...p, isCardHidden: prize.isCardHidden } : p))
-      );
       showNotification('error', 'Network error updating prize visibility.');
+    } finally {
+      setTogglingSerial(null);
+    }
+  };
+
+  // Master Toggle: Public Winning Prizes Showcase Visibility
+  const handleToggleShowcaseVisibility = async () => {
+    if (!token || togglingShowcase) return;
+    const newIsHidden = !isShowcaseHidden;
+    setTogglingShowcase(true);
+
+    try {
+      const res = await fetch('/api/admin/prizes/showcase-visibility', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ isHidden: newIsHidden }),
+      });
+
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setIsShowcaseHidden(newIsHidden);
+        showNotification(
+          'success',
+          `Public Winning Prizes Showcase is now ${
+            newIsHidden ? 'COMPLETELY HIDDEN from public website' : 'VISIBLE on public website'
+          }.`
+        );
+      } else {
+        showNotification('error', data.error || 'Failed to update showcase visibility.');
+      }
+    } catch {
+      showNotification('error', 'Network error updating showcase visibility.');
+    } finally {
+      setTogglingShowcase(false);
     }
   };
 
@@ -732,6 +950,17 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBackToCustomer
           >
             <Sparkles className="w-4 h-4" />
             <span>Winning Prizes (100 Prizes)</span>
+          </button>
+          <button
+            onClick={() => setActiveTab('links')}
+            className={`px-4 py-2 rounded-xl text-xs font-cinzel font-bold uppercase tracking-wider flex items-center gap-2 transition-colors cursor-pointer ${
+              activeTab === 'links'
+                ? 'bg-amber-400 text-black shadow-md'
+                : 'bg-neutral-900 border border-neutral-800 text-neutral-400 hover:text-white'
+            }`}
+          >
+            <LinkIcon className="w-4 h-4" />
+            <span>One-Time Links ({linksStats?.total ?? 0})</span>
           </button>
         </div>
 
@@ -1078,31 +1307,42 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBackToCustomer
                               )}
                             </td>
 
-                            {/* Action Button: HIDE / UNHIDE */}
+                            {/* Action Buttons: HIDE / UNHIDE & GENERATE LINK */}
                             <td className="py-3 px-4 text-right">
-                              <button
-                                onClick={() => handleToggleBoxVisibility(b)}
-                                disabled={isToggling}
-                                title={
-                                  b.isHidden
-                                    ? `Unhide box ${b.serial} and restore to public website`
-                                    : `Hide box ${b.serial} from public website`
-                                }
-                                className={`px-3 py-1.5 rounded-lg text-[11px] font-bold uppercase tracking-wider flex items-center gap-1.5 ml-auto transition-all cursor-pointer shadow-sm active:scale-95 ${
-                                  b.isHidden
-                                    ? 'bg-emerald-900/80 hover:bg-emerald-700 border border-emerald-500/60 text-emerald-100 hover:text-white'
-                                    : 'bg-neutral-900 hover:bg-neutral-800 border border-amber-500/50 hover:border-amber-400 text-amber-300 hover:text-white'
-                                }`}
-                              >
-                                {isToggling ? (
-                                  <div className="w-3.5 h-3.5 border border-current border-t-transparent rounded-full animate-spin" />
-                                ) : b.isHidden ? (
-                                  <Eye className="w-3.5 h-3.5 text-emerald-400" />
-                                ) : (
-                                  <EyeOff className="w-3.5 h-3.5 text-amber-400" />
-                                )}
-                                <span>{b.isHidden ? 'UNHIDE' : 'HIDE'}</span>
-                              </button>
+                              <div className="flex items-center justify-end gap-1.5">
+                                <button
+                                  onClick={() => handleGenerateLink(b.serial)}
+                                  disabled={b.status === 'OPENED'}
+                                  title={`Generate / Copy Private One-Time Link for ${b.serial}`}
+                                  className="px-2.5 py-1.5 rounded-lg text-[11px] font-bold uppercase tracking-wider flex items-center gap-1 bg-neutral-900 hover:bg-neutral-800 border border-neutral-700 hover:border-amber-400 text-amber-300 hover:text-white transition-all cursor-pointer shadow-sm active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed"
+                                >
+                                  <LinkIcon className="w-3.5 h-3.5 text-amber-400" />
+                                  <span>Link</span>
+                                </button>
+                                <button
+                                  onClick={() => handleToggleBoxVisibility(b)}
+                                  disabled={isToggling}
+                                  title={
+                                    b.isHidden
+                                      ? `Unhide box ${b.serial} and restore to public website`
+                                      : `Hide box ${b.serial} from public website`
+                                  }
+                                  className={`px-3 py-1.5 rounded-lg text-[11px] font-bold uppercase tracking-wider flex items-center gap-1.5 transition-all cursor-pointer shadow-sm active:scale-95 ${
+                                    b.isHidden
+                                      ? 'bg-emerald-900/80 hover:bg-emerald-700 border border-emerald-500/60 text-emerald-100 hover:text-white'
+                                      : 'bg-neutral-900 hover:bg-neutral-800 border border-amber-500/50 hover:border-amber-400 text-amber-300 hover:text-white'
+                                  }`}
+                                >
+                                  {isToggling ? (
+                                    <div className="w-3.5 h-3.5 border border-current border-t-transparent rounded-full animate-spin" />
+                                  ) : b.isHidden ? (
+                                    <Eye className="w-3.5 h-3.5 text-emerald-400" />
+                                  ) : (
+                                    <EyeOff className="w-3.5 h-3.5 text-amber-400" />
+                                  )}
+                                  <span>{b.isHidden ? 'UNHIDE' : 'HIDE'}</span>
+                                </button>
+                              </div>
                             </td>
                           </tr>
                         );
@@ -1120,6 +1360,67 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBackToCustomer
            ===================================================================== */}
         {activeTab === 'prizes' && (
           <div className="space-y-4">
+            {/* Master Showcase Visibility Control */}
+            <div
+              className={`p-4 rounded-2xl border flex flex-col sm:flex-row items-center justify-between gap-4 transition-all ${
+                isShowcaseHidden
+                  ? 'bg-red-950/25 border-red-500/50'
+                  : 'bg-emerald-950/20 border-emerald-500/40'
+              }`}
+            >
+              <div className="flex items-center gap-3">
+                <div
+                  className={`w-10 h-10 rounded-xl flex items-center justify-center border shrink-0 ${
+                    isShowcaseHidden
+                      ? 'bg-red-500/20 border-red-500/40 text-red-300'
+                      : 'bg-emerald-500/20 border-emerald-500/40 text-emerald-300'
+                  }`}
+                >
+                  {isShowcaseHidden ? <EyeOff className="w-5 h-5 text-red-400" /> : <Eye className="w-5 h-5 text-emerald-400" />}
+                </div>
+                <div>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <h4 className="text-sm font-bold font-cinzel text-white">
+                      Public Winning Prizes Showcase
+                    </h4>
+                    <span
+                      className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider ${
+                        isShowcaseHidden
+                          ? 'bg-red-500/20 text-red-300 border border-red-500/40'
+                          : 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+                      }`}
+                    >
+                      {isShowcaseHidden ? 'SHOWCASE HIDDEN FROM PUBLIC' : 'SHOWCASE PUBLICLY ACTIVE'}
+                    </span>
+                  </div>
+                  <p className="text-xs text-neutral-400 mt-0.5">
+                    {isShowcaseHidden
+                      ? 'The entire Winning Prizes section is completely removed from the public website and public API.'
+                      : 'The Winning Prizes section is visible on the public website (individual hidden cards remain excluded).'}
+                  </p>
+                </div>
+              </div>
+
+              <button
+                onClick={handleToggleShowcaseVisibility}
+                disabled={togglingShowcase}
+                className={`px-4 py-2 rounded-xl text-xs font-bold uppercase tracking-wider flex items-center gap-2 cursor-pointer transition-all shadow-md active:scale-95 disabled:opacity-60 whitespace-nowrap shrink-0 ${
+                  isShowcaseHidden
+                    ? 'bg-emerald-600 hover:bg-emerald-500 text-white border border-emerald-400/50'
+                    : 'bg-red-900/80 hover:bg-red-800 text-red-100 border border-red-500/50'
+                }`}
+              >
+                {togglingShowcase ? (
+                  <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                ) : isShowcaseHidden ? (
+                  <Eye className="w-4 h-4" />
+                ) : (
+                  <EyeOff className="w-4 h-4" />
+                )}
+                <span>{isShowcaseHidden ? 'Unhide Entire Showcase' : 'Hide Entire Showcase'}</span>
+              </button>
+            </div>
+
             {/* Header / Search toolbar */}
             <div className="bg-[#0c0c12] border border-neutral-800 p-3 rounded-2xl flex flex-col sm:flex-row items-center justify-between gap-3 text-xs">
               <div className="flex items-center gap-2">
@@ -1249,13 +1550,20 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBackToCustomer
                       <div className="flex items-center gap-2 pt-2 border-t border-neutral-800 text-xs">
                         <button
                           onClick={() => handleTogglePrizeCardVisibility(p)}
-                          className={`flex-1 py-1.5 px-2.5 rounded-lg font-medium flex items-center justify-center gap-1.5 transition-colors cursor-pointer ${
+                          disabled={togglingSerial === p.serial}
+                          className={`flex-1 py-1.5 px-2.5 rounded-lg font-medium flex items-center justify-center gap-1.5 transition-colors cursor-pointer disabled:opacity-60 ${
                             p.isCardHidden
                               ? 'bg-emerald-950/70 hover:bg-emerald-900 border border-emerald-500/40 text-emerald-200'
                               : 'bg-neutral-900 hover:bg-neutral-800 border border-neutral-700 text-neutral-300 hover:text-white'
                           }`}
                         >
-                          {p.isCardHidden ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
+                          {togglingSerial === p.serial ? (
+                            <div className="w-3.5 h-3.5 border-2 border-amber-400 border-t-transparent rounded-full animate-spin" />
+                          ) : p.isCardHidden ? (
+                            <Eye className="w-3.5 h-3.5" />
+                          ) : (
+                            <EyeOff className="w-3.5 h-3.5" />
+                          )}
                           <span>{p.isCardHidden ? 'Unhide Card' : 'Hide Card'}</span>
                         </button>
 
@@ -1274,6 +1582,334 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBackToCustomer
                     </div>
                   );
                 })
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* =====================================================================
+            TAB 3: SECURE ONE-TIME CUSTOMER LINKS MANAGEMENT
+           ===================================================================== */}
+        {activeTab === 'links' && (
+          <div className="space-y-4">
+            {/* Top Generator Card */}
+            <div className="bg-[#0c0c12] border border-amber-500/30 rounded-2xl p-4 sm:p-5 shadow-xl">
+              <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-4 pb-3 border-b border-neutral-800/80">
+                <div>
+                  <h3 className="text-sm font-bold font-cinzel text-white flex items-center gap-2">
+                    <LinkIcon className="w-4 h-4 text-amber-400" />
+                    <span>Generate Customer One-Time Link</span>
+                  </h3>
+                  <p className="text-xs text-neutral-400 mt-0.5">
+                    Generate an unguessable 192-bit cryptographic one-time token assigned permanently to a specific box.
+                  </p>
+                </div>
+                <div className="flex items-center gap-2 text-xs">
+                  <span className="px-2.5 py-1 rounded-full bg-emerald-950/60 border border-emerald-500/40 text-emerald-300 font-mono-numbers">
+                    {linksStats.unused} Unused (Ready)
+                  </span>
+                  <span className="px-2.5 py-1 rounded-full bg-purple-950/60 border border-purple-500/40 text-purple-300 font-mono-numbers">
+                    {linksStats.used} Opened
+                  </span>
+                  <span className="px-2.5 py-1 rounded-full bg-red-950/60 border border-red-500/40 text-red-300 font-mono-numbers">
+                    {linksStats.revoked} Revoked
+                  </span>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-12 gap-3 items-end">
+                <div className="sm:col-span-4">
+                  <label className="text-[11px] font-semibold text-neutral-400 uppercase font-cinzel block mb-1">
+                    Box Serial Number *
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="e.g. SS00000001"
+                    value={genBoxSerial}
+                    onChange={(e) => setGenBoxSerial(e.target.value.toUpperCase())}
+                    className="w-full px-3 py-2 bg-neutral-900 border border-neutral-700 rounded-xl text-white text-xs font-mono-numbers tracking-wider focus:outline-none focus:border-amber-400"
+                  />
+                </div>
+                <div className="sm:col-span-5">
+                  <label className="text-[11px] font-semibold text-neutral-400 uppercase font-cinzel block mb-1">
+                    Customer Name or Note (Optional)
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="e.g. WhatsApp Order #1042 - Rahul"
+                    value={genNote}
+                    onChange={(e) => setGenNote(e.target.value)}
+                    className="w-full px-3 py-2 bg-neutral-900 border border-neutral-700 rounded-xl text-white text-xs placeholder-neutral-500 focus:outline-none focus:border-amber-400"
+                  />
+                </div>
+                <div className="sm:col-span-3">
+                  <button
+                    onClick={() => handleGenerateLink()}
+                    disabled={genLoading || !genBoxSerial.trim()}
+                    className="w-full py-2 px-4 rounded-xl bg-gradient-to-r from-amber-400 to-yellow-500 hover:from-amber-300 hover:to-yellow-400 text-black font-cinzel font-bold text-xs uppercase tracking-wider flex items-center justify-center gap-1.5 transition-all shadow-md active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+                  >
+                    {genLoading ? (
+                      <div className="w-3.5 h-3.5 border-2 border-black border-t-transparent rounded-full animate-spin" />
+                    ) : (
+                      <PlusCircle className="w-4 h-4 text-black" />
+                    )}
+                    <span>Generate Link</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {/* Filter and Search Bar for Links */}
+            <div className="bg-[#0c0c12] border border-neutral-800 p-3 rounded-2xl flex flex-col lg:flex-row items-center justify-between gap-3 text-xs">
+              <div className="relative w-full lg:w-80">
+                <Search className="w-4 h-4 text-neutral-500 absolute left-3 top-1/2 -translate-y-1/2" />
+                <input
+                  type="text"
+                  placeholder="Filter by Box Serial or Note..."
+                  value={linksSearch}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    setLinksSearch(val);
+                    fetchLinks(1, val, linksStatusFilter);
+                  }}
+                  className="w-full pl-9 pr-3 py-1.5 bg-neutral-900 border border-neutral-700 rounded-xl text-white text-xs placeholder-neutral-500 focus:outline-none focus:border-amber-400"
+                />
+              </div>
+
+              {/* Status Filter Tabs */}
+              <div className="flex items-center gap-1 overflow-x-auto w-full lg:w-auto">
+                {[
+                  { label: `All (${linksStats.total})`, value: 'all' },
+                  { label: `Unused (${linksStats.unused})`, value: 'UNUSED' },
+                  { label: `Used (${linksStats.used})`, value: 'USED' },
+                  { label: `Revoked (${linksStats.revoked})`, value: 'REVOKED' },
+                ].map((tab) => (
+                  <button
+                    key={tab.value}
+                    onClick={() => {
+                      setLinksStatusFilter(tab.value);
+                      fetchLinks(1, linksSearch, tab.value);
+                    }}
+                    className={`px-3 py-1.5 rounded-lg font-cinzel text-[11px] font-bold uppercase tracking-wider transition-colors cursor-pointer whitespace-nowrap ${
+                      linksStatusFilter === tab.value
+                        ? 'bg-amber-400 text-black shadow-sm'
+                        : 'bg-neutral-900 border border-neutral-800 text-neutral-400 hover:text-white'
+                    }`}
+                  >
+                    {tab.label}
+                  </button>
+                ))}
+
+                <button
+                  onClick={() => fetchLinks(linksPage, linksSearch, linksStatusFilter)}
+                  className="p-1.5 rounded-lg bg-neutral-900 border border-neutral-800 text-neutral-400 hover:text-white ml-2"
+                  title="Refresh links"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${linksLoading ? 'animate-spin text-amber-400' : ''}`} />
+                </button>
+              </div>
+            </div>
+
+            {/* Links Table */}
+            <div className="bg-[#0c0c12] border border-neutral-800 rounded-2xl overflow-hidden shadow-xl">
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs border-collapse">
+                  <thead>
+                    <tr className="border-b border-neutral-800 bg-neutral-950/60 text-neutral-400 uppercase font-cinzel text-[10px] tracking-wider">
+                      <th className="py-3 px-4">Box Serial</th>
+                      <th className="py-3 px-4">Status</th>
+                      <th className="py-3 px-4">Created Time</th>
+                      <th className="py-3 px-4">Used / Revoked Time</th>
+                      <th className="py-3 px-4">Customer Note</th>
+                      <th className="py-3 px-4 text-right">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-neutral-850">
+                    {linksLoading && links.length === 0 ? (
+                      <tr>
+                        <td colSpan={6} className="py-12 text-center text-neutral-400">
+                          <div className="flex flex-col items-center justify-center gap-2">
+                            <div className="w-6 h-6 border-2 border-amber-400 border-t-transparent rounded-full animate-spin" />
+                            <span>Loading customer links...</span>
+                          </div>
+                        </td>
+                      </tr>
+                    ) : links.length === 0 ? (
+                      <tr>
+                        <td colSpan={6} className="py-12 text-center text-neutral-500">
+                          No one-time links found. Generate one using the form above.
+                        </td>
+                      </tr>
+                    ) : (
+                      links.map((link) => {
+                        const isCopied = copiedLinkId === link.id;
+                        const isRevoking = revokingLinkId === link.id;
+                        const isReplacing = replacingSerial === link.boxSerial;
+
+                        return (
+                          <tr
+                            key={link.id}
+                            className="hover:bg-neutral-900/50 transition-colors"
+                          >
+                            {/* Box Serial */}
+                            <td className="py-3 px-4">
+                              <div className="flex items-center gap-2">
+                                <span className="font-mono-numbers font-bold text-amber-300 text-sm">
+                                  {link.boxSerial}
+                                </span>
+                                {link.isWinner && (
+                                  <span className="px-1.5 py-0.5 rounded bg-yellow-500/20 border border-yellow-400/40 text-[9px] font-bold text-yellow-300 uppercase font-cinzel">
+                                    Winning Position
+                                  </span>
+                                )}
+                              </div>
+                            </td>
+
+                            {/* Status */}
+                            <td className="py-3 px-4">
+                              {link.status === 'UNUSED' ? (
+                                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-emerald-950/60 border border-emerald-500/40 text-emerald-300 font-bold text-[10px] uppercase tracking-wider">
+                                  <Check className="w-3 h-3 text-emerald-400" />
+                                  <span>UNUSED</span>
+                                </span>
+                              ) : link.status === 'USED' ? (
+                                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-purple-950/60 border border-purple-500/40 text-purple-300 font-bold text-[10px] uppercase tracking-wider">
+                                  <Lock className="w-3 h-3 text-purple-400" />
+                                  <span>USED</span>
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-red-950/60 border border-red-500/40 text-red-300 font-bold text-[10px] uppercase tracking-wider">
+                                  <Ban className="w-3 h-3 text-red-400" />
+                                  <span>REVOKED</span>
+                                </span>
+                              )}
+                            </td>
+
+                            {/* Created At */}
+                            <td className="py-3 px-4 font-mono-numbers text-neutral-400">
+                              {new Date(link.createdAt).toLocaleString()}
+                            </td>
+
+                            {/* Used / Revoked At */}
+                            <td className="py-3 px-4 font-mono-numbers text-neutral-400">
+                              {link.usedAt ? (
+                                <span className="text-purple-300">
+                                  Used: {new Date(link.usedAt).toLocaleString()}
+                                </span>
+                              ) : link.revokedAt ? (
+                                <span className="text-red-400">
+                                  Revoked: {new Date(link.revokedAt).toLocaleString()}
+                                </span>
+                              ) : (
+                                <span className="text-neutral-600">—</span>
+                              )}
+                            </td>
+
+                            {/* Customer Note */}
+                            <td className="py-3 px-4 text-neutral-300 max-w-[200px] truncate">
+                              {link.note || <span className="text-neutral-600 italic">No note</span>}
+                            </td>
+
+                            {/* Actions */}
+                            <td className="py-3 px-4 text-right">
+                              <div className="flex items-center justify-end gap-1.5">
+                                {/* Copy Link */}
+                                <button
+                                  onClick={() => handleCopyLink(link)}
+                                  disabled={link.status !== 'UNUSED'}
+                                  title="Copy private one-time link"
+                                  className="px-2.5 py-1.5 rounded-lg text-[11px] font-bold uppercase tracking-wider flex items-center gap-1 bg-neutral-900 hover:bg-neutral-800 border border-neutral-700 text-neutral-200 hover:text-white transition-all cursor-pointer shadow-sm active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed"
+                                >
+                                  {isCopied ? (
+                                    <>
+                                      <Check className="w-3.5 h-3.5 text-emerald-400" />
+                                      <span className="text-emerald-400">Copied!</span>
+                                    </>
+                                  ) : (
+                                    <>
+                                      <Copy className="w-3.5 h-3.5 text-amber-400" />
+                                      <span>Copy</span>
+                                    </>
+                                  )}
+                                </button>
+
+                                {/* Share WhatsApp */}
+                                <button
+                                  onClick={() => handleShareWhatsApp(link)}
+                                  disabled={link.status !== 'UNUSED'}
+                                  title="Share one-time link via WhatsApp"
+                                  className="px-2.5 py-1.5 rounded-lg text-[11px] font-bold uppercase tracking-wider flex items-center gap-1 bg-emerald-950/70 hover:bg-emerald-900 border border-emerald-500/50 text-emerald-300 hover:text-white transition-all cursor-pointer shadow-sm active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed"
+                                >
+                                  <MessageCircle className="w-3.5 h-3.5 text-emerald-400" />
+                                  <span>WhatsApp</span>
+                                </button>
+
+                                {/* Revoke Link (if UNUSED) */}
+                                {link.status === 'UNUSED' && (
+                                  <button
+                                    onClick={() => handleRevokeLink(link)}
+                                    disabled={isRevoking}
+                                    title="Revoke this unused link"
+                                    className="px-2.5 py-1.5 rounded-lg text-[11px] font-bold uppercase tracking-wider flex items-center gap-1 bg-red-950/60 hover:bg-red-900 border border-red-500/40 text-red-300 hover:text-white transition-all cursor-pointer shadow-sm active:scale-95 disabled:opacity-50"
+                                  >
+                                    <Ban className="w-3.5 h-3.5 text-red-400" />
+                                    <span>Revoke</span>
+                                  </button>
+                                )}
+
+                                {/* Replace Link (if REVOKED) */}
+                                {link.status === 'REVOKED' && (
+                                  <button
+                                    onClick={() => handleReplaceLink(link)}
+                                    disabled={isReplacing}
+                                    title="Generate fresh replacement link for this box"
+                                    className="px-2.5 py-1.5 rounded-lg text-[11px] font-bold uppercase tracking-wider flex items-center gap-1 bg-neutral-900 hover:bg-neutral-800 border border-neutral-700 text-amber-300 hover:text-white transition-all cursor-pointer shadow-sm active:scale-95 disabled:opacity-50"
+                                  >
+                                    <RotateCcw className="w-3.5 h-3.5 text-amber-400" />
+                                    <span>Replace</span>
+                                  </button>
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })
+                    )}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* Links Pagination */}
+              {linksTotalPages > 1 && (
+                <div className="flex items-center justify-between p-3 border-t border-neutral-800 text-xs">
+                  <span className="text-neutral-400 font-mono-numbers">
+                    Page {linksPage} of {linksTotalPages} ({linksTotal} links)
+                  </span>
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      disabled={linksPage <= 1 || linksLoading}
+                      onClick={() => {
+                        const nextP = linksPage - 1;
+                        setLinksPage(nextP);
+                        fetchLinks(nextP, linksSearch, linksStatusFilter);
+                      }}
+                      className="px-2.5 py-1 rounded-lg bg-neutral-900 border border-neutral-800 text-neutral-300 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed"
+                    >
+                      Prev
+                    </button>
+                    <button
+                      disabled={linksPage >= linksTotalPages || linksLoading}
+                      onClick={() => {
+                        const nextP = linksPage + 1;
+                        setLinksPage(nextP);
+                        fetchLinks(nextP, linksSearch, linksStatusFilter);
+                      }}
+                      className="px-2.5 py-1 rounded-lg bg-neutral-900 border border-neutral-800 text-neutral-300 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed"
+                    >
+                      Next
+                    </button>
+                  </div>
+                </div>
               )}
             </div>
           </div>

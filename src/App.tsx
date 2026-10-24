@@ -4,7 +4,7 @@
  */
 
 import React, { useEffect, useState } from 'react';
-import { Lock, Gift, Package } from 'lucide-react';
+import { Lock, Gift, Package, ShieldAlert } from 'lucide-react';
 import { BoxOpeningStage } from './components/BoxOpeningStage';
 import { AvailableBoxGrid } from './components/AvailableBoxGrid';
 import { WinningResult } from './components/WinningResult';
@@ -19,6 +19,7 @@ export default function App() {
   const [sessionLoading, setSessionLoading] = useState(true);
   const [activeResult, setActiveResult] = useState<OpenResult | null>(null);
   const [isReopenedUsedLink, setIsReopenedUsedLink] = useState(false);
+  const [isRevokedLink, setIsRevokedLink] = useState(false);
   const [isAdminView, setIsAdminView] = useState(() => {
     const path = window.location.pathname.toLowerCase();
     return path === '/admin' || path === '/admin/' || path.startsWith('/admin') || window.location.search.includes('admin=true');
@@ -70,6 +71,7 @@ export default function App() {
     // Do not treat the main website URL as an expired private link.
     if (!cleanToken) {
       setIsReopenedUsedLink(false);
+      setIsRevokedLink(false);
       setActiveResult(null);
       setCustomerSession({
         valid: true,
@@ -89,26 +91,40 @@ export default function App() {
       const data = await fetchCustomerSession(cleanToken);
       setCustomerSession(data);
 
-      // If a private customer link has already been opened, display "THIS LINK HAS ALREADY BEEN USED."
-      if (data.opened || data.used || data.alreadyUsed) {
+      if (data.revoked) {
+        setIsRevokedLink(true);
+        setIsReopenedUsedLink(false);
+      } else if (data.opened || data.used || data.alreadyUsed) {
         setIsReopenedUsedLink(true);
+        setIsRevokedLink(false);
       } else {
         setIsReopenedUsedLink(false);
+        setIsRevokedLink(false);
       }
     } catch (err: unknown) {
       console.error('Error loading customer session:', err);
-      // Fallback for unrecognized link: allow customer to browse available boxes
-      setCustomerSession({
-        valid: true,
-        token: cleanToken,
-        hasClaimed: false,
-        assignedBox: null,
-        batchId: 1,
-        opened: false,
-        used: false,
-        alreadyUsed: false,
-      });
-      setIsReopenedUsedLink(false);
+      const errMsg = (err as Error)?.message || '';
+      if (errMsg.includes('REVOKED')) {
+        setIsRevokedLink(true);
+        setIsReopenedUsedLink(false);
+      } else if (errMsg.includes('ALREADY BEEN USED')) {
+        setIsReopenedUsedLink(true);
+        setIsRevokedLink(false);
+      } else {
+        // Fallback for unrecognized link: allow customer to browse available boxes
+        setCustomerSession({
+          valid: true,
+          token: cleanToken,
+          hasClaimed: false,
+          assignedBox: null,
+          batchId: 1,
+          opened: false,
+          used: false,
+          alreadyUsed: false,
+        });
+        setIsReopenedUsedLink(false);
+        setIsRevokedLink(false);
+      }
     } finally {
       setSessionLoading(false);
     }
@@ -218,6 +234,28 @@ export default function App() {
             <span className="text-xs text-neutral-400 font-cinzel tracking-wider">
               Loading Super Surprise Box...
             </span>
+          </div>
+        ) : isRevokedLink ? (
+          <div className="w-full max-w-lg mx-auto bg-obsidian-card border border-red-500/40 rounded-2xl p-6 sm:p-10 shadow-2xl relative overflow-hidden text-center my-auto animate-fade-in">
+            <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-red-950/60 border border-red-500/50 text-red-300 text-xs font-semibold tracking-wider uppercase mb-6">
+              <ShieldAlert className="w-3.5 h-3.5 text-red-400" />
+              <span>Link Deactivated</span>
+            </div>
+            <h1 className="text-2xl sm:text-3xl font-extrabold tracking-tight text-white uppercase font-cinzel mb-4">
+              THIS LINK HAS BEEN REVOKED.
+            </h1>
+            <p className="text-neutral-400 text-xs sm:text-sm mb-6 leading-relaxed">
+              This private one-time link has been revoked or replaced by the administrator. Please contact support or request a new official link.
+            </p>
+            <button
+              onClick={() => {
+                window.history.pushState({}, '', '/');
+                loadTokenSession(null);
+              }}
+              className="px-4 py-2.5 rounded-xl bg-neutral-900 border border-neutral-700 text-amber-300 hover:text-white text-xs font-cinzel font-bold tracking-wider uppercase cursor-pointer"
+            >
+              Browse Available Boxes
+            </button>
           </div>
         ) : isReopenedUsedLink && customerSession ? (
           // 1. RE-OPENED / REFRESHED USED PRIVATE LINK: STRICTLY DISPLAY "THIS LINK HAS ALREADY BEEN USED."

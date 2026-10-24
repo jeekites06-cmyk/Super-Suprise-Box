@@ -7,6 +7,7 @@ export interface AvailableBox {
 
 export interface AvailableBoxesResponse {
   boxes: AvailableBox[];
+  totalInventory?: number;
   totalAvailable: number;
   totalBoxesCount?: number;
   page: number;
@@ -17,6 +18,7 @@ export interface AvailableBoxesResponse {
   totalBatchBoxes: number;
   openedCount?: number;
   claimedCount?: number;
+  reservedCount?: number;
   reservedWinningCount?: number;
   totalUnavailable?: number;
   hiddenCount?: number;
@@ -46,6 +48,8 @@ export interface CustomerSession {
   opened: boolean;
   used?: boolean;
   alreadyUsed?: boolean;
+  revoked?: boolean;
+  error?: string;
   openedAt?: string;
   result?: 'WINNER' | 'BETTER_LUCK' | null;
   prizeName?: string | null;
@@ -109,5 +113,37 @@ export interface AdminPrizeRecord {
   claimCode?: string;
   isCardHidden: boolean;
   customNote?: string;
+}
+
+export interface AdminCustomerLink {
+  id: number;
+  tokenHash: string;
+  tokenPrefix: string;
+  boxId: number;
+  boxSerial: string;
+  status: 'UNUSED' | 'USED' | 'REVOKED';
+  createdAt: string;
+  usedAt?: string | null;
+  revokedAt?: string | null;
+  createdBy?: string;
+  note?: string;
+  rawToken: string;
+  url: string;
+  isWinner?: boolean;
+}
+
+export interface AdminLinksResponse {
+  success: boolean;
+  links: AdminCustomerLink[];
+  totalCount: number;
+  page: number;
+  totalPages: number;
+  limit: number;
+  stats: {
+    total: number;
+    unused: number;
+    used: number;
+    revoked: number;
+  };
 }
 
