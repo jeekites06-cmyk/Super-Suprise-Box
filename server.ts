@@ -316,9 +316,13 @@ async function initDatabase(): Promise<void> {
           const settingsRes = await client.query('SELECT key, value FROM public.admin_settings;');
           for (const s of settingsRes.rows) {
             if (s.key === 'hiddenPrizeCards') {
-              try { storeData.batch.hiddenPrizeCards = JSON.parse(s.value); } catch (_) {}
+              try {
+                storeData.batch.hiddenPrizeCards = typeof s.value === 'string' ? JSON.parse(s.value) : (s.value || {});
+              } catch (_) {}
             } else if (s.key === 'prizeCustomNotes') {
-              try { storeData.batch.prizeCustomNotes = JSON.parse(s.value); } catch (_) {}
+              try {
+                storeData.batch.prizeCustomNotes = typeof s.value === 'string' ? JSON.parse(s.value) : (s.value || {});
+              } catch (_) {}
             } else if (s.key === 'isPrizeShowcaseHidden') {
               storeData.batch.isPrizeShowcaseHidden = s.value === 'true' || s.value === true;
             } else if (s.key === 'publicCustomerUrl') {
@@ -1148,9 +1152,9 @@ app.post('/api/admin/prizes/showcase-visibility', requireAdminAuth, async (req: 
       try {
         await neonPool.query(
           `INSERT INTO public.admin_settings (key, value, updated_at)
-           VALUES ('isPrizeShowcaseHidden', $1, NOW())
-           ON CONFLICT (key) DO UPDATE SET value = $1, updated_at = NOW()`,
-          [isHidden.toString()]
+           VALUES ('isPrizeShowcaseHidden', to_jsonb($1::boolean), NOW())
+           ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+          [isHidden]
         );
       } catch (err) {
         console.error('[DATABASE ERROR] Failed to persist showcase visibility to Neon:', err);
@@ -1696,9 +1700,9 @@ app.post('/api/admin/customer-url', requireAdminAuth, async (req: Request, res: 
   if (neonPool) {
     try {
       await neonPool.query(`
-        INSERT INTO public.admin_settings (key, value)
-        VALUES ('publicCustomerUrl', $1)
-        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
+        INSERT INTO public.admin_settings (key, value, updated_at)
+        VALUES ('publicCustomerUrl', to_jsonb($1::text), NOW())
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW();
       `, [cleanUrl]);
       console.log(`[ADMIN ACTION] Public customer URL persisted to Neon PostgreSQL: ${cleanUrl}`);
     } catch (dbErr) {
