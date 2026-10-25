@@ -25,12 +25,12 @@ import {
   Link as LinkIcon,
   Copy,
   MessageCircle,
-  RotateCcw,
-  PlusCircle,
   Check,
-  Ban,
+  Globe,
+  AlertTriangle,
+  CheckCheck,
 } from 'lucide-react';
-import { AdminBoxRecord, AdminStats, AdminPrizeRecord, AdminCustomerLink } from '../types/box';
+import { AdminBoxRecord, AdminStats, AdminPrizeRecord } from '../types/box';
 
 interface AdminDashboardProps {
   onBackToCustomerView: () => void;
@@ -51,29 +51,25 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBackToCustomer
   // Dashboard tab state: 'boxes' | 'prizes' | 'links'
   const [activeTab, setActiveTab] = useState<'boxes' | 'prizes' | 'links'>('boxes');
 
-  // Customer Links state
-  const [links, setLinks] = useState<AdminCustomerLink[]>([]);
-  const [linksTotal, setLinksTotal] = useState<number>(0);
-  const [linksPage, setLinksPage] = useState<number>(1);
-  const [linksTotalPages, setLinksTotalPages] = useState<number>(1);
-  const [linksLimit, setLinksLimit] = useState<number>(50);
-  const [linksSearch, setLinksSearch] = useState<string>('');
-  const [linksStatusFilter, setLinksStatusFilter] = useState<string>('all');
-  const [linksLoading, setLinksLoading] = useState<boolean>(false);
-  const [linksStats, setLinksStats] = useState<{ total: number; unused: number; used: number; revoked: number }>({
-    total: 0,
-    unused: 0,
-    used: 0,
-    revoked: 0,
-  });
-
-  // Link Generator form state
-  const [genBoxSerial, setGenBoxSerial] = useState<string>('');
-  const [genNote, setGenNote] = useState<string>('');
-  const [genLoading, setGenLoading] = useState<boolean>(false);
-  const [copiedLinkId, setCopiedLinkId] = useState<number | null>(null);
-  const [revokingLinkId, setRevokingLinkId] = useState<number | null>(null);
-  const [replacingSerial, setReplacingSerial] = useState<string | null>(null);
+  // Common Customer Link state
+  const [copiedCommonLink, setCopiedCommonLink] = useState<boolean>(false);
+  const [customerUrlConfig, setCustomerUrlConfig] = useState<{
+    publicCustomerUrl: string;
+    isConfigured: boolean;
+    isDevOrigin: boolean;
+    currentOrigin: string;
+    suggestedSharedUrl: string;
+  } | null>(null);
+  const [urlInputValue, setUrlInputValue] = useState<string>('');
+  const [isEditingUrl, setIsEditingUrl] = useState<boolean>(false);
+  const [isSavingUrl, setIsSavingUrl] = useState<boolean>(false);
+  const [isTestingUrl, setIsTestingUrl] = useState<boolean>(false);
+  const [urlTestFeedback, setUrlTestFeedback] = useState<{
+    success: boolean;
+    message: string;
+    statusCode?: number;
+    isPubliclyAccessible?: boolean;
+  } | null>(null);
 
   // Stats state
   const [stats, setStats] = useState<AdminStats | null>(null);
@@ -224,151 +220,163 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBackToCustomer
     }
   }, [token]);
 
-  // Fetch Customer Links
-  const fetchLinks = useCallback(
-    async (page = 1, search = '', status = 'all') => {
-      if (!token) return;
-      setLinksLoading(true);
-      try {
-        const params = new URLSearchParams();
-        params.set('page', page.toString());
-        params.set('limit', linksLimit.toString());
-        if (search) params.set('search', search);
-        if (status !== 'all') params.set('status', status);
-
-        const res = await fetch(`/api/admin/links?${params.toString()}`, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        if (res.ok) {
-          const data = await res.json();
-          setLinks(data.links || []);
-          setLinksTotal(data.totalCount || 0);
-          setLinksTotalPages(data.totalPages || 1);
-          setLinksPage(data.page || 1);
-          if (data.stats) setLinksStats(data.stats);
+  // 5. Fetch Customer URL Configuration
+  const fetchCustomerUrl = useCallback(async () => {
+    try {
+      const headers: Record<string, string> = {};
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+      const res = await fetch('/api/admin/customer-url', { headers });
+      if (res.ok) {
+        const data = await res.json();
+        setCustomerUrlConfig(data);
+        if (data.publicCustomerUrl) {
+          setUrlInputValue(data.publicCustomerUrl);
+        } else if (data.suggestedSharedUrl && !data.suggestedSharedUrl.includes('ais-dev-')) {
+          setUrlInputValue(data.suggestedSharedUrl);
         }
-      } catch (err) {
-        console.error('Failed to fetch links:', err);
-      } finally {
-        setLinksLoading(false);
       }
-    },
-    [token, linksLimit]
-  );
+    } catch (err) {
+      console.error('Failed to fetch customer URL config:', err);
+    }
+  }, [token]);
 
-  const handleGenerateLink = async (targetSerial?: string, customNote?: string) => {
-    const serial = (targetSerial || genBoxSerial).trim().toUpperCase();
-    if (!serial) {
-      showNotification('error', 'Please enter a valid box serial (e.g. SS00000001).');
+  const getCommonCustomerUrl = (): string => {
+    // 1. Authoritative configured public customer URL
+    if (customerUrlConfig?.publicCustomerUrl && customerUrlConfig.publicCustomerUrl.trim()) {
+      return customerUrlConfig.publicCustomerUrl.trim();
+    }
+    // 2. If current window origin is a non-dev, non-localhost domain, use it
+    if (typeof window !== 'undefined') {
+      const origin = window.location.origin;
+      if (!origin.includes('ais-dev-') && !origin.includes('localhost') && !origin.includes('127.0.0.1')) {
+        return origin;
+      }
+    }
+    // 3. Fallback: return empty string so we don't accidentally leak or share ais-dev- URLs
+    return '';
+  };
+
+  const handleCopyCustomerLink = () => {
+    const commonUrl = getCommonCustomerUrl();
+    if (!commonUrl) {
+      showNotification(
+        'error',
+        'Cannot copy internal Google AI Studio dev URL! It requires Google login and displays "403 Forbidden" on mobile. Please configure your public deployed URL below.'
+      );
+      setIsEditingUrl(true);
       return;
     }
-    if (!token) return;
-    setGenLoading(true);
-    try {
-      const res = await fetch('/api/admin/links/generate', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({ boxSerial: serial, note: customNote || genNote }),
+
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(commonUrl).then(() => {
+        setCopiedCommonLink(true);
+        showNotification('success', `Copied public customer link to clipboard: ${commonUrl}`);
+        setTimeout(() => setCopiedCommonLink(false), 2500);
+      }).catch(() => {
+        showNotification('error', 'Failed to copy public customer link to clipboard.');
       });
-      const data = await res.json();
-      if (res.ok && data.success) {
-        showNotification(
-          'success',
-          data.alreadyExists
-            ? `Active link already exists for Box ${serial}. Copied to clipboard!`
-            : `Private one-time link generated for Box ${serial}!`
-        );
-        if (data.link?.url) {
-          navigator.clipboard.writeText(data.link.url).catch(() => {});
-        }
-        setGenBoxSerial('');
-        setGenNote('');
-        fetchLinks(1, linksSearch, linksStatusFilter);
-        fetchStats();
-      } else {
-        showNotification('error', data.error || 'Failed to generate link.');
-      }
-    } catch {
-      showNotification('error', 'Network error generating customer link.');
-    } finally {
-      setGenLoading(false);
+    } else {
+      showNotification('success', `Copied public customer link: ${commonUrl}`);
     }
   };
 
-  const handleCopyLink = (link: AdminCustomerLink) => {
-    navigator.clipboard.writeText(link.url);
-    setCopiedLinkId(link.id);
-    showNotification('success', `Copied one-time link for Box ${link.boxSerial} to clipboard!`);
-    setTimeout(() => setCopiedLinkId(null), 2500);
-  };
+  const handleShareWhatsAppCommon = () => {
+    const commonUrl = getCommonCustomerUrl();
+    if (!commonUrl) {
+      showNotification(
+        'error',
+        'Cannot share internal Google AI Studio dev link on WhatsApp! Recipients opening this link on iPhone / Android will get a "403 — You do not have access to this page" error. Please deploy and set your public URL below.'
+      );
+      setIsEditingUrl(true);
+      return;
+    }
 
-  const handleShareWhatsApp = (link: AdminCustomerLink) => {
-    const text = `🎉 SUPER SURPRISE BOX - YOUR PRIVATE ONE-TIME LINK\n\nAssigned Box: ${link.boxSerial}\nOpen Link: ${link.url}\n\n⚠️ IMPORTANT: This private link is uniquely assigned to your box and can only be opened once. Once opened, it will permanently lock and cannot be reused. Good luck!`;
-    const waUrl = `https://wa.me/?text=${encodeURIComponent(text)}`;
+    const text = `🎉 *SUPER SURPRISE BOX (BATCH 1)*\n\nChoose your surprise box from 15,051 available boxes! 100 winning prizes including 4 Apple iPhones and 96 Cash Rewards.\n\nOpen link to select your box:\n${commonUrl}`;
+    const waUrl = `https://api.whatsapp.com/send?text=${encodeURIComponent(text)}`;
     window.open(waUrl, '_blank', 'noopener,noreferrer');
   };
 
-  const handleRevokeLink = async (link: AdminCustomerLink) => {
-    if (!window.confirm(`Are you sure you want to revoke the unused link for Box ${link.boxSerial}? A revoked link can never be used.`)) {
+  const handleSavePublicUrl = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!token) return;
+    const trimmed = urlInputValue.trim();
+    if (!trimmed) {
+      showNotification('error', 'Please enter a valid public URL.');
       return;
     }
-    if (!token) return;
-    setRevokingLinkId(link.id);
+
+    if (trimmed.includes('ais-dev-')) {
+      showNotification(
+        'error',
+        'Cannot save internal Google AI Studio dev URL (ais-dev-...). It requires Google login and will fail with 403 on mobile.'
+      );
+      return;
+    }
+
+    setIsSavingUrl(true);
+    setUrlTestFeedback(null);
     try {
-      const res = await fetch('/api/admin/links/revoke', {
+      const res = await fetch('/api/admin/customer-url', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ linkId: link.id, tokenHash: link.tokenHash }),
+        body: JSON.stringify({ publicCustomerUrl: trimmed }),
       });
       const data = await res.json();
       if (res.ok && data.success) {
-        showNotification('success', `Link for Box ${link.boxSerial} revoked successfully.`);
-        fetchLinks(linksPage, linksSearch, linksStatusFilter);
+        showNotification('success', 'Public customer website URL saved and verified successfully!');
+        setIsEditingUrl(false);
+        fetchCustomerUrl();
       } else {
-        showNotification('error', data.error || 'Failed to revoke link.');
+        showNotification('error', data.error || 'Failed to save public customer URL.');
       }
-    } catch {
-      showNotification('error', 'Error revoking link.');
+    } catch (err) {
+      console.error('Error saving public customer URL:', err);
+      showNotification('error', 'Network error saving public customer URL.');
     } finally {
-      setRevokingLinkId(null);
+      setIsSavingUrl(false);
     }
   };
 
-  const handleReplaceLink = async (link: AdminCustomerLink) => {
-    if (!window.confirm(`Generate a new replacement link for Box ${link.boxSerial}? Any prior unused link will be permanently revoked.`)) {
+  const handleTestPublicUrl = async (urlToTest?: string) => {
+    const target = urlToTest || urlInputValue || customerUrlConfig?.publicCustomerUrl;
+    if (!target) {
+      showNotification('error', 'Please enter or save a URL to verify.');
       return;
     }
-    if (!token) return;
-    setReplacingSerial(link.boxSerial);
+
+    setIsTestingUrl(true);
+    setUrlTestFeedback(null);
     try {
-      const res = await fetch('/api/admin/links/replace', {
+      const res = await fetch('/api/admin/customer-url/test', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ boxSerial: link.boxSerial, note: 'Replacement link' }),
+        body: JSON.stringify({ url: target }),
       });
       const data = await res.json();
-      if (res.ok && data.success) {
-        showNotification('success', `New replacement link generated for Box ${link.boxSerial}!`);
-        if (data.link?.url) {
-          navigator.clipboard.writeText(data.link.url).catch(() => {});
-        }
-        fetchLinks(linksPage, linksSearch, linksStatusFilter);
+      setUrlTestFeedback({
+        success: !!data.isPubliclyAccessible,
+        message: data.message,
+        statusCode: data.statusCode,
+        isPubliclyAccessible: data.isPubliclyAccessible,
+      });
+      if (data.isPubliclyAccessible) {
+        showNotification('success', 'URL Verified: Accessible to mobile visitors without login!');
       } else {
-        showNotification('error', data.error || 'Failed to replace link.');
+        showNotification('error', data.message || 'URL verification failed.');
       }
     } catch {
-      showNotification('error', 'Error generating replacement link.');
+      setUrlTestFeedback({
+        success: false,
+        message: 'Could not connect to URL verification service.',
+      });
     } finally {
-      setReplacingSerial(null);
+      setIsTestingUrl(false);
     }
   };
 
@@ -376,15 +384,14 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBackToCustomer
   useEffect(() => {
     if (isAuthenticated) {
       fetchStats();
+      fetchCustomerUrl();
       if (activeTab === 'boxes') {
         fetchBoxes(boxesPage, boxesLimit, boxesSearch, boxesFilter);
       } else if (activeTab === 'prizes') {
         fetchPrizes();
-      } else if (activeTab === 'links') {
-        fetchLinks(linksPage, linksSearch, linksStatusFilter);
       }
     }
-  }, [isAuthenticated, activeTab, fetchStats, fetchBoxes, fetchPrizes, fetchLinks, boxesPage, boxesLimit, boxesSearch, boxesFilter, linksPage, linksSearch, linksStatusFilter]);
+  }, [isAuthenticated, activeTab, fetchStats, fetchBoxes, fetchPrizes, fetchCustomerUrl, boxesPage, boxesLimit, boxesSearch, boxesFilter]);
 
   // Handle Login
   const handleLoginSubmit = async (e: React.FormEvent) => {
@@ -960,7 +967,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBackToCustomer
             }`}
           >
             <LinkIcon className="w-4 h-4" />
-            <span>One-Time Links ({linksStats?.total ?? 0})</span>
+            <span>ONE-TIME LINKS</span>
           </button>
         </div>
 
@@ -1307,18 +1314,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBackToCustomer
                               )}
                             </td>
 
-                            {/* Action Buttons: HIDE / UNHIDE & GENERATE LINK */}
+                            {/* Action Button: HIDE / UNHIDE */}
                             <td className="py-3 px-4 text-right">
                               <div className="flex items-center justify-end gap-1.5">
-                                <button
-                                  onClick={() => handleGenerateLink(b.serial)}
-                                  disabled={b.status === 'OPENED'}
-                                  title={`Generate / Copy Private One-Time Link for ${b.serial}`}
-                                  className="px-2.5 py-1.5 rounded-lg text-[11px] font-bold uppercase tracking-wider flex items-center gap-1 bg-neutral-900 hover:bg-neutral-800 border border-neutral-700 hover:border-amber-400 text-amber-300 hover:text-white transition-all cursor-pointer shadow-sm active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed"
-                                >
-                                  <LinkIcon className="w-3.5 h-3.5 text-amber-400" />
-                                  <span>Link</span>
-                                </button>
                                 <button
                                   onClick={() => handleToggleBoxVisibility(b)}
                                   disabled={isToggling}
@@ -1588,329 +1586,294 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBackToCustomer
         )}
 
         {/* =====================================================================
-            TAB 3: SECURE ONE-TIME CUSTOMER LINKS MANAGEMENT
+            TAB 3: COMMON CUSTOMER LINK (ALL 15,051 BOXES)
            ===================================================================== */}
         {activeTab === 'links' && (
           <div className="space-y-4">
-            {/* Top Generator Card */}
-            <div className="bg-[#0c0c12] border border-amber-500/30 rounded-2xl p-4 sm:p-5 shadow-xl">
-              <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-4 pb-3 border-b border-neutral-800/80">
+            <div className="bg-[#0c0c12] border border-amber-500/30 rounded-2xl p-5 sm:p-7 shadow-xl relative overflow-hidden">
+              {/* Decorative ambient gold glow */}
+              <div className="absolute top-0 right-0 w-80 h-80 bg-amber-500/5 rounded-full blur-3xl pointer-events-none" />
+
+              {/* Header */}
+              <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-6 pb-5 border-b border-neutral-800/80">
                 <div>
-                  <h3 className="text-sm font-bold font-cinzel text-white flex items-center gap-2">
-                    <LinkIcon className="w-4 h-4 text-amber-400" />
-                    <span>Generate Customer One-Time Link</span>
-                  </h3>
-                  <p className="text-xs text-neutral-400 mt-0.5">
-                    Generate an unguessable 192-bit cryptographic one-time token assigned permanently to a specific box.
+                  <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-amber-500/10 border border-amber-400/30 text-[10px] text-amber-300 font-cinzel font-bold uppercase tracking-wider mb-2">
+                    <LinkIcon className="w-3.5 h-3.5 text-amber-400" />
+                    <span>Official Common Customer Portal</span>
+                  </div>
+                  <h2 className="text-lg sm:text-xl font-black font-cinzel text-white uppercase tracking-wide">
+                    Common Customer Link
+                  </h2>
+                  <p className="text-xs text-neutral-400 mt-1 max-w-2xl leading-relaxed">
+                    One common public link for all 15,051 boxes. Share this URL with unlimited customers to allow them to browse, search, and select any currently available surprise box. Each box is claimed on-demand with atomic server-side locking, and this link remains permanently reusable.
                   </p>
                 </div>
-                <div className="flex items-center gap-2 text-xs">
-                  <span className="px-2.5 py-1 rounded-full bg-emerald-950/60 border border-emerald-500/40 text-emerald-300 font-mono-numbers">
-                    {linksStats.unused} Unused (Ready)
-                  </span>
-                  <span className="px-2.5 py-1 rounded-full bg-purple-950/60 border border-purple-500/40 text-purple-300 font-mono-numbers">
-                    {linksStats.used} Opened
-                  </span>
-                  <span className="px-2.5 py-1 rounded-full bg-red-950/60 border border-red-500/40 text-red-300 font-mono-numbers">
-                    {linksStats.revoked} Revoked
-                  </span>
-                </div>
-              </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-12 gap-3 items-end">
-                <div className="sm:col-span-4">
-                  <label className="text-[11px] font-semibold text-neutral-400 uppercase font-cinzel block mb-1">
-                    Box Serial Number *
-                  </label>
-                  <input
-                    type="text"
-                    placeholder="e.g. SS00000001"
-                    value={genBoxSerial}
-                    onChange={(e) => setGenBoxSerial(e.target.value.toUpperCase())}
-                    className="w-full px-3 py-2 bg-neutral-900 border border-neutral-700 rounded-xl text-white text-xs font-mono-numbers tracking-wider focus:outline-none focus:border-amber-400"
-                  />
-                </div>
-                <div className="sm:col-span-5">
-                  <label className="text-[11px] font-semibold text-neutral-400 uppercase font-cinzel block mb-1">
-                    Customer Name or Note (Optional)
-                  </label>
-                  <input
-                    type="text"
-                    placeholder="e.g. WhatsApp Order #1042 - Rahul"
-                    value={genNote}
-                    onChange={(e) => setGenNote(e.target.value)}
-                    className="w-full px-3 py-2 bg-neutral-900 border border-neutral-700 rounded-xl text-white text-xs placeholder-neutral-500 focus:outline-none focus:border-amber-400"
-                  />
-                </div>
-                <div className="sm:col-span-3">
-                  <button
-                    onClick={() => handleGenerateLink()}
-                    disabled={genLoading || !genBoxSerial.trim()}
-                    className="w-full py-2 px-4 rounded-xl bg-gradient-to-r from-amber-400 to-yellow-500 hover:from-amber-300 hover:to-yellow-400 text-black font-cinzel font-bold text-xs uppercase tracking-wider flex items-center justify-center gap-1.5 transition-all shadow-md active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
-                  >
-                    {genLoading ? (
-                      <div className="w-3.5 h-3.5 border-2 border-black border-t-transparent rounded-full animate-spin" />
-                    ) : (
-                      <PlusCircle className="w-4 h-4 text-black" />
-                    )}
-                    <span>Generate Link</span>
-                  </button>
-                </div>
-              </div>
-            </div>
-
-            {/* Filter and Search Bar for Links */}
-            <div className="bg-[#0c0c12] border border-neutral-800 p-3 rounded-2xl flex flex-col lg:flex-row items-center justify-between gap-3 text-xs">
-              <div className="relative w-full lg:w-80">
-                <Search className="w-4 h-4 text-neutral-500 absolute left-3 top-1/2 -translate-y-1/2" />
-                <input
-                  type="text"
-                  placeholder="Filter by Box Serial or Note..."
-                  value={linksSearch}
-                  onChange={(e) => {
-                    const val = e.target.value;
-                    setLinksSearch(val);
-                    fetchLinks(1, val, linksStatusFilter);
-                  }}
-                  className="w-full pl-9 pr-3 py-1.5 bg-neutral-900 border border-neutral-700 rounded-xl text-white text-xs placeholder-neutral-500 focus:outline-none focus:border-amber-400"
-                />
-              </div>
-
-              {/* Status Filter Tabs */}
-              <div className="flex items-center gap-1 overflow-x-auto w-full lg:w-auto">
-                {[
-                  { label: `All (${linksStats.total})`, value: 'all' },
-                  { label: `Unused (${linksStats.unused})`, value: 'UNUSED' },
-                  { label: `Used (${linksStats.used})`, value: 'USED' },
-                  { label: `Revoked (${linksStats.revoked})`, value: 'REVOKED' },
-                ].map((tab) => (
-                  <button
-                    key={tab.value}
-                    onClick={() => {
-                      setLinksStatusFilter(tab.value);
-                      fetchLinks(1, linksSearch, tab.value);
-                    }}
-                    className={`px-3 py-1.5 rounded-lg font-cinzel text-[11px] font-bold uppercase tracking-wider transition-colors cursor-pointer whitespace-nowrap ${
-                      linksStatusFilter === tab.value
-                        ? 'bg-amber-400 text-black shadow-sm'
-                        : 'bg-neutral-900 border border-neutral-800 text-neutral-400 hover:text-white'
-                    }`}
-                  >
-                    {tab.label}
-                  </button>
-                ))}
-
-                <button
-                  onClick={() => fetchLinks(linksPage, linksSearch, linksStatusFilter)}
-                  className="p-1.5 rounded-lg bg-neutral-900 border border-neutral-800 text-neutral-400 hover:text-white ml-2"
-                  title="Refresh links"
-                >
-                  <RefreshCw className={`w-3.5 h-3.5 ${linksLoading ? 'animate-spin text-amber-400' : ''}`} />
-                </button>
-              </div>
-            </div>
-
-            {/* Links Table */}
-            <div className="bg-[#0c0c12] border border-neutral-800 rounded-2xl overflow-hidden shadow-xl">
-              <div className="overflow-x-auto">
-                <table className="w-full text-left text-xs border-collapse">
-                  <thead>
-                    <tr className="border-b border-neutral-800 bg-neutral-950/60 text-neutral-400 uppercase font-cinzel text-[10px] tracking-wider">
-                      <th className="py-3 px-4">Box Serial</th>
-                      <th className="py-3 px-4">Status</th>
-                      <th className="py-3 px-4">Created Time</th>
-                      <th className="py-3 px-4">Used / Revoked Time</th>
-                      <th className="py-3 px-4">Customer Note</th>
-                      <th className="py-3 px-4 text-right">Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-neutral-850">
-                    {linksLoading && links.length === 0 ? (
-                      <tr>
-                        <td colSpan={6} className="py-12 text-center text-neutral-400">
-                          <div className="flex flex-col items-center justify-center gap-2">
-                            <div className="w-6 h-6 border-2 border-amber-400 border-t-transparent rounded-full animate-spin" />
-                            <span>Loading customer links...</span>
-                          </div>
-                        </td>
-                      </tr>
-                    ) : links.length === 0 ? (
-                      <tr>
-                        <td colSpan={6} className="py-12 text-center text-neutral-500">
-                          No one-time links found. Generate one using the form above.
-                        </td>
-                      </tr>
-                    ) : (
-                      links.map((link) => {
-                        const isCopied = copiedLinkId === link.id;
-                        const isRevoking = revokingLinkId === link.id;
-                        const isReplacing = replacingSerial === link.boxSerial;
-
-                        return (
-                          <tr
-                            key={link.id}
-                            className="hover:bg-neutral-900/50 transition-colors"
-                          >
-                            {/* Box Serial */}
-                            <td className="py-3 px-4">
-                              <div className="flex items-center gap-2">
-                                <span className="font-mono-numbers font-bold text-amber-300 text-sm">
-                                  {link.boxSerial}
-                                </span>
-                                {link.isWinner && (
-                                  <span className="px-1.5 py-0.5 rounded bg-yellow-500/20 border border-yellow-400/40 text-[9px] font-bold text-yellow-300 uppercase font-cinzel">
-                                    Winning Position
-                                  </span>
-                                )}
-                              </div>
-                            </td>
-
-                            {/* Status */}
-                            <td className="py-3 px-4">
-                              {link.status === 'UNUSED' ? (
-                                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-emerald-950/60 border border-emerald-500/40 text-emerald-300 font-bold text-[10px] uppercase tracking-wider">
-                                  <Check className="w-3 h-3 text-emerald-400" />
-                                  <span>UNUSED</span>
-                                </span>
-                              ) : link.status === 'USED' ? (
-                                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-purple-950/60 border border-purple-500/40 text-purple-300 font-bold text-[10px] uppercase tracking-wider">
-                                  <Lock className="w-3 h-3 text-purple-400" />
-                                  <span>USED</span>
-                                </span>
-                              ) : (
-                                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-red-950/60 border border-red-500/40 text-red-300 font-bold text-[10px] uppercase tracking-wider">
-                                  <Ban className="w-3 h-3 text-red-400" />
-                                  <span>REVOKED</span>
-                                </span>
-                              )}
-                            </td>
-
-                            {/* Created At */}
-                            <td className="py-3 px-4 font-mono-numbers text-neutral-400">
-                              {new Date(link.createdAt).toLocaleString()}
-                            </td>
-
-                            {/* Used / Revoked At */}
-                            <td className="py-3 px-4 font-mono-numbers text-neutral-400">
-                              {link.usedAt ? (
-                                <span className="text-purple-300">
-                                  Used: {new Date(link.usedAt).toLocaleString()}
-                                </span>
-                              ) : link.revokedAt ? (
-                                <span className="text-red-400">
-                                  Revoked: {new Date(link.revokedAt).toLocaleString()}
-                                </span>
-                              ) : (
-                                <span className="text-neutral-600">—</span>
-                              )}
-                            </td>
-
-                            {/* Customer Note */}
-                            <td className="py-3 px-4 text-neutral-300 max-w-[200px] truncate">
-                              {link.note || <span className="text-neutral-600 italic">No note</span>}
-                            </td>
-
-                            {/* Actions */}
-                            <td className="py-3 px-4 text-right">
-                              <div className="flex items-center justify-end gap-1.5">
-                                {/* Copy Link */}
-                                <button
-                                  onClick={() => handleCopyLink(link)}
-                                  disabled={link.status !== 'UNUSED'}
-                                  title="Copy private one-time link"
-                                  className="px-2.5 py-1.5 rounded-lg text-[11px] font-bold uppercase tracking-wider flex items-center gap-1 bg-neutral-900 hover:bg-neutral-800 border border-neutral-700 text-neutral-200 hover:text-white transition-all cursor-pointer shadow-sm active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed"
-                                >
-                                  {isCopied ? (
-                                    <>
-                                      <Check className="w-3.5 h-3.5 text-emerald-400" />
-                                      <span className="text-emerald-400">Copied!</span>
-                                    </>
-                                  ) : (
-                                    <>
-                                      <Copy className="w-3.5 h-3.5 text-amber-400" />
-                                      <span>Copy</span>
-                                    </>
-                                  )}
-                                </button>
-
-                                {/* Share WhatsApp */}
-                                <button
-                                  onClick={() => handleShareWhatsApp(link)}
-                                  disabled={link.status !== 'UNUSED'}
-                                  title="Share one-time link via WhatsApp"
-                                  className="px-2.5 py-1.5 rounded-lg text-[11px] font-bold uppercase tracking-wider flex items-center gap-1 bg-emerald-950/70 hover:bg-emerald-900 border border-emerald-500/50 text-emerald-300 hover:text-white transition-all cursor-pointer shadow-sm active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed"
-                                >
-                                  <MessageCircle className="w-3.5 h-3.5 text-emerald-400" />
-                                  <span>WhatsApp</span>
-                                </button>
-
-                                {/* Revoke Link (if UNUSED) */}
-                                {link.status === 'UNUSED' && (
-                                  <button
-                                    onClick={() => handleRevokeLink(link)}
-                                    disabled={isRevoking}
-                                    title="Revoke this unused link"
-                                    className="px-2.5 py-1.5 rounded-lg text-[11px] font-bold uppercase tracking-wider flex items-center gap-1 bg-red-950/60 hover:bg-red-900 border border-red-500/40 text-red-300 hover:text-white transition-all cursor-pointer shadow-sm active:scale-95 disabled:opacity-50"
-                                  >
-                                    <Ban className="w-3.5 h-3.5 text-red-400" />
-                                    <span>Revoke</span>
-                                  </button>
-                                )}
-
-                                {/* Replace Link (if REVOKED) */}
-                                {link.status === 'REVOKED' && (
-                                  <button
-                                    onClick={() => handleReplaceLink(link)}
-                                    disabled={isReplacing}
-                                    title="Generate fresh replacement link for this box"
-                                    className="px-2.5 py-1.5 rounded-lg text-[11px] font-bold uppercase tracking-wider flex items-center gap-1 bg-neutral-900 hover:bg-neutral-800 border border-neutral-700 text-amber-300 hover:text-white transition-all cursor-pointer shadow-sm active:scale-95 disabled:opacity-50"
-                                  >
-                                    <RotateCcw className="w-3.5 h-3.5 text-amber-400" />
-                                    <span>Replace</span>
-                                  </button>
-                                )}
-                              </div>
-                            </td>
-                          </tr>
-                        );
-                      })
-                    )}
-                  </tbody>
-                </table>
-              </div>
-
-              {/* Links Pagination */}
-              {linksTotalPages > 1 && (
-                <div className="flex items-center justify-between p-3 border-t border-neutral-800 text-xs">
-                  <span className="text-neutral-400 font-mono-numbers">
-                    Page {linksPage} of {linksTotalPages} ({linksTotal} links)
-                  </span>
-                  <div className="flex items-center gap-1.5">
-                    <button
-                      disabled={linksPage <= 1 || linksLoading}
-                      onClick={() => {
-                        const nextP = linksPage - 1;
-                        setLinksPage(nextP);
-                        fetchLinks(nextP, linksSearch, linksStatusFilter);
-                      }}
-                      className="px-2.5 py-1 rounded-lg bg-neutral-900 border border-neutral-800 text-neutral-300 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed"
-                    >
-                      Prev
-                    </button>
-                    <button
-                      disabled={linksPage >= linksTotalPages || linksLoading}
-                      onClick={() => {
-                        const nextP = linksPage + 1;
-                        setLinksPage(nextP);
-                        fetchLinks(nextP, linksSearch, linksStatusFilter);
-                      }}
-                      className="px-2.5 py-1 rounded-lg bg-neutral-900 border border-neutral-800 text-neutral-300 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed"
-                    >
-                      Next
-                    </button>
+                <div className="flex items-center gap-2">
+                  <div className="px-3.5 py-2 rounded-xl bg-neutral-900/90 border border-emerald-500/40 text-emerald-300 flex items-center gap-2 text-xs font-mono-numbers">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                    <span>Unlimited Reusable Link</span>
                   </div>
                 </div>
-              )}
+              </div>
+
+              {/* Mobile 403 Error Prevention & Deployment Guidance Banner */}
+              {customerUrlConfig?.isDevOrigin && !customerUrlConfig?.isConfigured ? (
+                <div className="mb-6 p-4 rounded-xl bg-amber-950/40 border border-amber-500/50 text-amber-200">
+                  <div className="flex items-start gap-3">
+                    <AlertTriangle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
+                    <div className="space-y-2 flex-1 text-xs">
+                      <div className="font-cinzel font-bold text-amber-300 text-sm">
+                        Action Required: Internal AI Studio Dev URL Detected
+                      </div>
+                      <p className="text-neutral-300 leading-relaxed">
+                        You are currently viewing the Admin Portal from Google AI Studio's internal dev container (<code className="px-1.5 py-0.5 rounded bg-black/60 font-mono text-amber-300 text-[11px]">ais-dev-...</code>). This development URL requires your Google developer login and causes Google's <strong className="text-white">“403 — You do not have access to this page”</strong> error when opened on iPhone Safari, Android browsers, or WhatsApp.
+                      </p>
+                      <div className="p-3 rounded-lg bg-black/50 border border-amber-500/30 space-y-1.5 text-[11px]">
+                        <div className="font-bold text-amber-400 uppercase tracking-wide">
+                          Steps to Deploy & Enable Mobile Sharing:
+                        </div>
+                        <ol className="list-decimal list-inside space-y-1 text-neutral-300">
+                          <li>
+                            <strong className="text-white">Deploy / Publish:</strong> Click the <strong className="text-amber-300">“Share”</strong> or <strong className="text-amber-300">“Publish”</strong> button in the Google AI Studio editor top bar to deploy your public preview link (<code className="font-mono text-neutral-300">{customerUrlConfig.suggestedSharedUrl}</code>), or deploy to your custom domain.
+                          </li>
+                          <li>
+                            <strong className="text-white">Configure Public URL:</strong> Click <strong className="text-amber-300">“Configure Public URL”</strong> below, enter your deployed public URL, and click <strong className="text-amber-300">“Save Public URL”</strong>.
+                          </li>
+                          <li>
+                            <strong className="text-white">Share Freely:</strong> The Copy and WhatsApp buttons will immediately share your clean, public website URL with zero login required.
+                          </li>
+                        </ol>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              ) : customerUrlConfig?.isConfigured ? (
+                <div className="mb-6 p-3.5 rounded-xl bg-emerald-950/40 border border-emerald-500/40 text-emerald-200 flex items-center justify-between gap-3 text-xs">
+                  <div className="flex items-center gap-2.5">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                    <span>
+                      <strong className="font-semibold text-emerald-300">Public Customer Website URL Active:</strong> Mobile WhatsApp recipients can open this link directly with no Google login.
+                    </span>
+                  </div>
+                  <span className="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 text-[10px] font-mono font-bold uppercase shrink-0">
+                    Mobile Ready
+                  </span>
+                </div>
+              ) : null}
+
+              {/* Common Link Display Box & Configuration Mode */}
+              <div className="mb-6 space-y-3">
+                <div className="flex items-center justify-between">
+                  <label className="text-[11px] font-semibold text-neutral-300 uppercase font-cinzel tracking-wider block">
+                    Public Customer Website URL
+                  </label>
+                  {!isEditingUrl && (
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => handleTestPublicUrl()}
+                        disabled={isTestingUrl || !getCommonCustomerUrl()}
+                        className="text-[11px] px-2.5 py-1 rounded bg-neutral-900 hover:bg-neutral-800 border border-neutral-700 text-neutral-300 hover:text-white flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
+                        title="Verify unauthenticated public accessibility"
+                      >
+                        {isTestingUrl ? (
+                          <div className="w-3 h-3 border-2 border-amber-400 border-t-transparent rounded-full animate-spin" />
+                        ) : (
+                          <ExternalLink className="w-3 h-3 text-amber-400" />
+                        )}
+                        <span>Verify Mobile Access</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setIsEditingUrl(true);
+                          setUrlInputValue(getCommonCustomerUrl() || customerUrlConfig?.suggestedSharedUrl || '');
+                        }}
+                        className="text-[11px] px-2.5 py-1 rounded bg-amber-500/10 hover:bg-amber-500/20 border border-amber-400/30 text-amber-300 hover:text-amber-200 flex items-center gap-1.5 transition-colors cursor-pointer"
+                      >
+                        <Edit2 className="w-3 h-3" />
+                        <span>Configure Public URL</span>
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {!isEditingUrl ? (
+                  <div className="flex items-center gap-2 bg-neutral-950 border border-neutral-800 rounded-xl p-2.5 sm:p-3">
+                    <Globe className="w-4 h-4 text-neutral-500 shrink-0 ml-1" />
+                    <span className="text-xs sm:text-sm text-amber-300 font-mono font-medium truncate flex-1 select-all">
+                      {getCommonCustomerUrl() || (
+                        <span className="text-neutral-500 italic">
+                          No public URL configured yet (click "Configure Public URL" above)
+                        </span>
+                      )}
+                    </span>
+                    <span className="text-[10px] font-bold uppercase font-cinzel px-2.5 py-1 rounded bg-amber-500/20 text-amber-300 border border-amber-400/40 shrink-0">
+                      Batch 1 · 15,051 Boxes
+                    </span>
+                  </div>
+                ) : (
+                  <div className="p-4 rounded-xl bg-neutral-950 border border-amber-500/40 space-y-3">
+                    <div className="text-xs text-neutral-300">
+                      Enter the live, publicly deployed customer website URL (do NOT enter an internal <code className="text-red-400">ais-dev-</code> URL):
+                    </div>
+                    <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+                      <div className="relative flex-1">
+                        <Globe className="w-4 h-4 text-neutral-500 absolute left-3 top-1/2 -translate-y-1/2" />
+                        <input
+                          type="url"
+                          value={urlInputValue}
+                          onChange={(e) => setUrlInputValue(e.target.value)}
+                          placeholder="https://ais-pre-... or https://yourdomain.com"
+                          className="w-full pl-9 pr-3 py-2 bg-neutral-900 border border-neutral-700 focus:border-amber-400 rounded-lg text-xs font-mono text-white placeholder-neutral-600 focus:outline-none"
+                        />
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => handleSavePublicUrl()}
+                          disabled={isSavingUrl || !urlInputValue.trim()}
+                          className="px-4 py-2 rounded-lg bg-amber-500 hover:bg-amber-400 text-black font-cinzel font-bold text-xs uppercase flex items-center justify-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
+                        >
+                          {isSavingUrl ? (
+                            <div className="w-3.5 h-3.5 border-2 border-black border-t-transparent rounded-full animate-spin" />
+                          ) : (
+                            <Save className="w-3.5 h-3.5" />
+                          )}
+                          <span>Save Public URL</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setIsEditingUrl(false);
+                            setUrlTestFeedback(null);
+                          }}
+                          className="px-3 py-2 rounded-lg bg-neutral-900 hover:bg-neutral-800 border border-neutral-700 text-neutral-300 hover:text-white text-xs font-medium transition-colors cursor-pointer"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+
+                    {customerUrlConfig?.suggestedSharedUrl && !customerUrlConfig.suggestedSharedUrl.includes('ais-dev-') && (
+                      <div className="flex items-center gap-2 text-[11px] text-neutral-400">
+                        <span>AI Studio Shared URL:</span>
+                        <button
+                          type="button"
+                          onClick={() => setUrlInputValue(customerUrlConfig.suggestedSharedUrl)}
+                          className="text-amber-400 hover:underline font-mono text-[10px] truncate max-w-md text-left"
+                        >
+                          {customerUrlConfig.suggestedSharedUrl}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setUrlInputValue(customerUrlConfig.suggestedSharedUrl)}
+                          className="px-1.5 py-0.5 rounded bg-neutral-800 hover:bg-neutral-700 text-neutral-300 text-[10px] shrink-0"
+                        >
+                          Use This
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Verification Feedback Notice */}
+                {urlTestFeedback && (
+                  <div
+                    className={`p-3 rounded-xl border text-xs flex items-start gap-2.5 ${
+                      urlTestFeedback.success
+                        ? 'bg-emerald-950/40 border-emerald-500/40 text-emerald-200'
+                        : 'bg-red-950/40 border-red-500/40 text-red-200'
+                    }`}
+                  >
+                    {urlTestFeedback.success ? (
+                      <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+                    ) : (
+                      <AlertCircle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
+                    )}
+                    <div className="space-y-1">
+                      <div className="font-bold">
+                        {urlTestFeedback.success
+                          ? 'Verification Successful: Publicly Accessible'
+                          : 'Public Verification Failed'}
+                      </div>
+                      <p className="text-[11px] leading-relaxed text-neutral-300">
+                        {urlTestFeedback.message}
+                      </p>
+                    </div>
+                  </div>
+                )}
+
+                <p className="text-[11px] text-neutral-500 leading-normal">
+                  Customers who open this link will directly access the complete interactive inventory grid to browse, search, and claim any available box.
+                </p>
+              </div>
+
+              {/* The Two Official Buttons: COPY CUSTOMER LINK & SHARE VIA WHATSAPP */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5 pt-2">
+                {/* Button 1: COPY CUSTOMER LINK */}
+                <button
+                  type="button"
+                  onClick={handleCopyCustomerLink}
+                  className="w-full py-3.5 px-6 rounded-xl bg-gradient-to-r from-amber-400 via-yellow-400 to-amber-500 hover:from-amber-300 hover:to-yellow-300 text-black font-cinzel font-bold text-xs sm:text-sm uppercase tracking-wider flex items-center justify-center gap-2.5 transition-all shadow-[0_4px_20px_rgba(245,158,11,0.25)] active:scale-[0.98] cursor-pointer"
+                >
+                  {copiedCommonLink ? (
+                    <>
+                      <Check className="w-4 h-4 text-black stroke-[3]" />
+                      <span>LINK COPIED TO CLIPBOARD!</span>
+                    </>
+                  ) : (
+                    <>
+                      <Copy className="w-4 h-4 text-black stroke-[2.5]" />
+                      <span>COPY CUSTOMER LINK</span>
+                    </>
+                  )}
+                </button>
+
+                {/* Button 2: SHARE VIA WHATSAPP */}
+                <button
+                  type="button"
+                  onClick={handleShareWhatsAppCommon}
+                  className="w-full py-3.5 px-6 rounded-xl bg-[#25D366] hover:bg-[#20ba5a] text-white font-cinzel font-bold text-xs sm:text-sm uppercase tracking-wider flex items-center justify-center gap-2.5 transition-all shadow-[0_4px_20px_rgba(37,211,102,0.3)] active:scale-[0.98] cursor-pointer"
+                >
+                  <MessageCircle className="w-4 h-4 text-white stroke-[2.5]" />
+                  <span>SHARE VIA WHATSAPP</span>
+                </button>
+              </div>
+
+              {/* Security & Architecture Highlights */}
+              <div className="mt-8 pt-6 border-t border-neutral-800/80 grid grid-cols-1 md:grid-cols-3 gap-3.5 text-xs text-neutral-400">
+                <div className="p-3.5 rounded-xl bg-neutral-950/60 border border-neutral-800">
+                  <div className="text-amber-300 font-cinzel font-bold mb-1 flex items-center gap-1.5">
+                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>Single Common Link</span>
+                  </div>
+                  <p className="text-[11px] leading-relaxed">
+                    All customers use this single URL. No need to generate, manage, or replace 15,051 individual links.
+                  </p>
+                </div>
+
+                <div className="p-3.5 rounded-xl bg-neutral-950/60 border border-neutral-800">
+                  <div className="text-amber-300 font-cinzel font-bold mb-1 flex items-center gap-1.5">
+                    <Lock className="w-3.5 h-3.5 text-amber-400" />
+                    <span>Atomic Claim Protection</span>
+                  </div>
+                  <p className="text-[11px] leading-relaxed">
+                    When a customer chooses a box, backend serializable locks prevent any box from being claimed twice.
+                  </p>
+                </div>
+
+                <div className="p-3.5 rounded-xl bg-neutral-950/60 border border-neutral-800">
+                  <div className="text-amber-300 font-cinzel font-bold mb-1 flex items-center gap-1.5">
+                    <Sparkles className="w-3.5 h-3.5 text-yellow-400" />
+                    <span>100 Winning Prizes Intact</span>
+                  </div>
+                  <p className="text-[11px] leading-relaxed">
+                    All 4 Apple iPhones and 96 Cash Prizes remain securely allocated and hidden until customer reveal.
+                  </p>
+                </div>
+              </div>
             </div>
           </div>
         )}

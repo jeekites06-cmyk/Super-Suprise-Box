@@ -129,6 +129,7 @@ interface StoreSchema {
     hiddenPrizeCards: Record<string, boolean>;
     prizeCustomNotes: Record<string, string>;
     isPrizeShowcaseHidden: boolean;
+    publicCustomerUrl?: string;
   };
   customers: Record<string, CustomerRecord>;
   customerLinks?: Record<string, CustomerLinkRecord>;
@@ -320,6 +321,8 @@ async function initDatabase(): Promise<void> {
               try { storeData.batch.prizeCustomNotes = JSON.parse(s.value); } catch (_) {}
             } else if (s.key === 'isPrizeShowcaseHidden') {
               storeData.batch.isPrizeShowcaseHidden = s.value === 'true' || s.value === true;
+            } else if (s.key === 'publicCustomerUrl') {
+              storeData.batch.publicCustomerUrl = typeof s.value === 'string' ? s.value.trim() : (s.value ? String(s.value).trim() : '');
             }
           }
 
@@ -1015,6 +1018,90 @@ app.post('/api/admin/boxes/visibility', requireAdminAuth, async (req: Request, r
   }
 });
 
+// F2. Admin Clear Test Claims Endpoint (Pre-launch maintenance)
+app.post('/api/admin/clear-test-claims', requireAdminAuth, async (req: Request, res: Response): Promise<void> => {
+  const { serials } = req.body || {};
+  const targetSerials: string[] = Array.isArray(serials) && serials.length > 0
+    ? serials.map((s: string) => s.trim().toUpperCase())
+    : ['SS00000010', 'SS00000020'];
+
+  const releaseLock = await dbTransactionLock.acquire();
+  try {
+    const updatedBoxes: string[] = [];
+    const clearedTokens: string[] = [];
+
+    // Reset in-memory boxesMap
+    for (const serial of targetSerials) {
+      const box = boxesMap.get(serial);
+      if (box && (box.claimed || box.opened || box.status !== 'AVAILABLE')) {
+        if (box.claimedBy) clearedTokens.push(box.claimedBy);
+        box.status = 'AVAILABLE';
+        box.claimed = false;
+        delete box.claimedBy;
+        delete box.claimedAt;
+        box.opened = false;
+        delete box.openedAt;
+        delete box.result;
+        delete box.prizeName;
+        delete box.claimCode;
+        updatedBoxes.push(serial);
+      }
+    }
+
+    // Reset customer records in storeData
+    if (storeData.customers) {
+      for (const [token, cust] of Object.entries(storeData.customers)) {
+        if (clearedTokens.includes(token) || (cust.assignedBox && targetSerials.includes(cust.assignedBox))) {
+          delete storeData.customers[token];
+        }
+      }
+    }
+
+    // Neon PostgreSQL update
+    if (neonPool && targetSerials.length > 0) {
+      try {
+        await neonPool.query(
+          `UPDATE public.boxes
+           SET status = 'AVAILABLE',
+               claimed = FALSE,
+               claimed_by = NULL,
+               claimed_at = NULL,
+               opened = FALSE,
+               opened_at = NULL,
+               result = NULL,
+               prize_name = NULL,
+               claim_code = NULL,
+               updated_at = NOW()
+           WHERE serial = ANY($1::varchar[])`,
+          [targetSerials]
+        );
+        if (clearedTokens.length > 0) {
+          await neonPool.query(
+            `DELETE FROM public.customers WHERE token = ANY($1::varchar[])`,
+            [clearedTokens]
+          );
+        }
+      } catch (dbErr) {
+        console.error('[DATABASE ERROR] Failed to clear test claims in Neon:', dbErr);
+      }
+    }
+
+    saveBoxesToDisk();
+    saveStoreToDisk();
+
+    console.log(`[ADMIN ACTION] Cleared test claims for: ${targetSerials.join(', ')}`);
+
+    res.json({
+      success: true,
+      clearedBoxes: updatedBoxes,
+      clearedTokens,
+      message: `Successfully reset ${updatedBoxes.length} test boxes to AVAILABLE and cleared test claims.`,
+    });
+  } finally {
+    releaseLock();
+  }
+});
+
 // G. Admin List Winning Prizes & Claim Statuses
 app.get('/api/admin/prizes', requireAdminAuth, (_req: Request, res: Response): void => {
   const prizesList = WINNING_SERIALS.map((serial) => {
@@ -1519,6 +1606,188 @@ app.post('/api/admin/links/replace', requireAdminAuth, async (req: Request, res:
   });
 });
 
+// =========================================================================
+// --- COMMON CUSTOMER WEBSITE URL & MOBILE ACCESSIBILITY HANDLERS ---
+// =========================================================================
+
+// Public URL resolver (accessible without auth)
+app.get(['/api/public-url', '/api/customer-url'], (req: Request, res: Response): void => {
+  const reqProto = req.headers['x-forwarded-proto'] || req.protocol || 'http';
+  const reqHost = req.headers['x-forwarded-host'] || req.headers.host || 'localhost:3000';
+  const currentOrigin = `${reqProto}://${reqHost}`;
+  
+  const configured = storeData.batch.publicCustomerUrl?.trim() || process.env.PUBLIC_CUSTOMER_URL?.trim() || process.env.VITE_PUBLIC_CUSTOMER_URL?.trim() || '';
+  const isDevOrigin = currentOrigin.includes('ais-dev-') || currentOrigin.includes('localhost') || currentOrigin.includes('127.0.0.1');
+  const suggestedSharedUrl = currentOrigin.includes('ais-dev-')
+    ? currentOrigin.replace('ais-dev-', 'ais-pre-')
+    : (configured || currentOrigin);
+
+  res.json({
+    success: true,
+    publicCustomerUrl: configured || (isDevOrigin ? '' : currentOrigin),
+    isConfigured: !!configured,
+    isDevOrigin,
+    currentOrigin,
+    suggestedSharedUrl,
+  });
+});
+
+// Admin Get Customer URL with detailed deployment diagnostics
+app.get('/api/admin/customer-url', requireAdminAuth, (req: Request, res: Response): void => {
+  const reqProto = req.headers['x-forwarded-proto'] || req.protocol || 'http';
+  const reqHost = req.headers['x-forwarded-host'] || req.headers.host || 'localhost:3000';
+  const currentOrigin = `${reqProto}://${reqHost}`;
+  
+  const configured = storeData.batch.publicCustomerUrl?.trim() || process.env.PUBLIC_CUSTOMER_URL?.trim() || process.env.VITE_PUBLIC_CUSTOMER_URL?.trim() || '';
+  const isDevOrigin = currentOrigin.includes('ais-dev-') || currentOrigin.includes('localhost') || currentOrigin.includes('127.0.0.1');
+  const suggestedSharedUrl = currentOrigin.includes('ais-dev-')
+    ? currentOrigin.replace('ais-dev-', 'ais-pre-')
+    : (configured || currentOrigin);
+
+  res.json({
+    success: true,
+    publicCustomerUrl: configured || (isDevOrigin ? '' : currentOrigin),
+    isConfigured: !!configured,
+    isDevOrigin,
+    currentOrigin,
+    suggestedSharedUrl,
+  });
+});
+
+// Admin Save Customer URL
+app.post('/api/admin/customer-url', requireAdminAuth, async (req: Request, res: Response): Promise<void> => {
+  const rawUrl = (req.body.publicCustomerUrl || req.body.url || '')?.toString().trim();
+
+  if (!rawUrl) {
+    res.status(400).json({ error: 'Public customer website URL cannot be empty.' });
+    return;
+  }
+
+  let cleanUrl = rawUrl;
+  if (!cleanUrl.startsWith('http://') && !cleanUrl.startsWith('https://')) {
+    cleanUrl = `https://${cleanUrl}`;
+  }
+
+  try {
+    const parsed = new URL(cleanUrl);
+    if (!parsed.hostname || parsed.hostname.length < 3) {
+      res.status(400).json({ error: 'Please enter a valid public URL with a valid domain name.' });
+      return;
+    }
+  } catch {
+    res.status(400).json({ error: 'Invalid URL format. Please provide a valid HTTP/HTTPS URL.' });
+    return;
+  }
+
+  // Strictly disallow ais-dev- domains as customer links because they require Google developer login
+  if (cleanUrl.includes('ais-dev-')) {
+    res.status(400).json({
+      error: 'Cannot use Google AI Studio internal dev URL (ais-dev-...). These URLs require Google developer login and display "403 — You do not have access to this page" on mobile/WhatsApp. Please publish your app and provide the public Shared URL (ais-pre-...) or your custom domain.',
+    });
+    return;
+  }
+
+  // Strip trailing slashes
+  cleanUrl = cleanUrl.replace(/\/+$/, '');
+
+  storeData.batch.publicCustomerUrl = cleanUrl;
+  saveStoreToDisk();
+
+  if (neonPool) {
+    try {
+      await neonPool.query(`
+        INSERT INTO public.admin_settings (key, value)
+        VALUES ('publicCustomerUrl', $1)
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
+      `, [cleanUrl]);
+      console.log(`[ADMIN ACTION] Public customer URL persisted to Neon PostgreSQL: ${cleanUrl}`);
+    } catch (dbErr) {
+      console.error('[DATABASE ERROR] Failed to save publicCustomerUrl to Neon:', dbErr);
+    }
+  }
+
+  res.json({
+    success: true,
+    publicCustomerUrl: cleanUrl,
+    message: 'Public customer website URL saved successfully.',
+  });
+});
+
+// Admin Test/Verify Public Customer URL accessibility
+app.post('/api/admin/customer-url/test', requireAdminAuth, async (req: Request, res: Response): Promise<void> => {
+  const targetUrl = (req.body.url || storeData.batch.publicCustomerUrl || '').toString().trim();
+  if (!targetUrl) {
+    res.status(400).json({ error: 'No URL provided to test.' });
+    return;
+  }
+
+  if (targetUrl.includes('ais-dev-')) {
+    res.json({
+      success: false,
+      statusCode: 403,
+      isPubliclyAccessible: false,
+      errorType: 'AI_STUDIO_DEV_URL',
+      message: 'This is an internal Google AI Studio development URL (ais-dev-...). It requires Google developer session cookies and displays "403 — You do not have access to this page" on iPhone / Android mobile devices.',
+    });
+    return;
+  }
+
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 7000);
+    const checkRes = await fetch(targetUrl, {
+      method: 'GET',
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 WhatsApp/2.23',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      },
+      signal: controller.signal,
+      redirect: 'follow',
+    });
+    clearTimeout(timeout);
+
+    const status = checkRes.status;
+    if (status >= 200 && status < 400) {
+      res.json({
+        success: true,
+        statusCode: status,
+        isPubliclyAccessible: true,
+        message: `URL is live and publicly accessible without login (HTTP ${status} OK). Mobile users can open this URL without a Google account.`,
+      });
+    } else if (status === 403) {
+      res.json({
+        success: false,
+        statusCode: status,
+        isPubliclyAccessible: false,
+        errorType: 'FORBIDDEN',
+        message: 'HTTP 403 Forbidden received. The server rejected unauthenticated mobile access.',
+      });
+    } else if (status === 404) {
+      res.json({
+        success: false,
+        statusCode: status,
+        isPubliclyAccessible: false,
+        errorType: 'NOT_FOUND',
+        message: 'HTTP 404 Not Found received. If this is an AI Studio Shared App URL (ais-pre-...), click "Share" or "Publish" in the Google AI Studio editor top bar to deploy it.',
+      });
+    } else {
+      res.json({
+        success: false,
+        statusCode: status,
+        isPubliclyAccessible: false,
+        message: `URL returned HTTP ${status}.`,
+      });
+    }
+  } catch (err: any) {
+    res.json({
+      success: false,
+      statusCode: 0,
+      isPubliclyAccessible: false,
+      message: `Failed to connect to ${targetUrl}: ${err.message || 'Network error'}`,
+    });
+  }
+});
+
 // 3. Customer Session: verify link and enforce one-time use
 app.get('/api/customer/session', (req: Request, res: Response): void => {
   let token = (req.query.token as string | undefined)?.trim();
@@ -1790,6 +2059,7 @@ app.post('/api/boxes/claim', async (req: Request, res: Response): Promise<void> 
       success: true,
       boxSerial: cleanSerial,
       assignedBox: cleanSerial,
+      token: cleanToken,
       message: `Box ${cleanSerial} has been successfully assigned to you!`,
     });
   } finally {
@@ -1947,6 +2217,13 @@ app.post('/api/customer/open', async (req: Request, res: Response): Promise<void
         alreadyOpened: false,
         alreadyUsed: false,
         boxSerial: assignedBoxSerial,
+        box: {
+          serial: assignedBoxSerial,
+          result,
+          prizeName: prizeName || null,
+          openedAt: now,
+          claimCode: claimCode || null,
+        },
         result,
         prizeName: prizeName || undefined,
         claimCode: claimCode || undefined,

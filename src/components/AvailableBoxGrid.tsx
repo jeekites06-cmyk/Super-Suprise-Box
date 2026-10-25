@@ -282,9 +282,6 @@ export const AvailableBoxGrid: React.FC<AvailableBoxGridProps> = ({
     return pages;
   };
 
-  const availabilityPercentage = ((totalAvailable / (totalInventory || 15051)) * 100).toFixed(
-    totalAvailable === totalInventory ? 0 : 1
-  );
 
   const filteredPublicPrizes = publicPrizes.filter((p) => {
     if (!prizeSearch.trim()) return true;
@@ -394,6 +391,13 @@ export const AvailableBoxGrid: React.FC<AvailableBoxGridProps> = ({
             </span>
           </div>
         </div>
+      </div>
+
+      {/* Caption below the hero: “🎁 YOUR SURPRISE. YOUR MOMENT. YOUR REWARD. ✨” */}
+      <div className="text-center py-1 select-none">
+        <p className="text-xs sm:text-sm font-cinzel font-bold tracking-widest text-transparent bg-clip-text bg-gradient-to-r from-amber-200 via-yellow-400 to-amber-200 uppercase drop-shadow-[0_2px_10px_rgba(245,158,11,0.2)]">
+          🎁 YOUR SURPRISE. YOUR MOMENT. YOUR REWARD. ✨
+        </p>
       </div>
 
       {/* Claim Error Banner */}

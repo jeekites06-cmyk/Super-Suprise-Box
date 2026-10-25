@@ -119,7 +119,7 @@ async function runTests() {
   const openData1 = await openRes1.json();
   assert(openRes1.status === 200, `First box open succeeded with 200 (got ${openRes1.status})`);
   assert(openData1.success === true, 'openData1.success is true');
-  assert(openData1.box?.serial === 'SS00000100', 'Opened box serial matches SS00000100');
+  assert((openData1.boxSerial || openData1.box?.serial) === 'SS00000100', 'Opened box serial matches SS00000100');
 
   // 5. Strict One-Time Use: Second Open Attempt MUST return EXACT string
   console.log('\n--- TEST 4: Strict One-Time Use Rejection ---');

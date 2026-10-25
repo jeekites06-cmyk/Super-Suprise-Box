@@ -115,6 +115,14 @@ export interface AdminPrizeRecord {
   customNote?: string;
 }
 
+export interface PublicPrize {
+  serial: string;
+  prizeName: string;
+  isOpened: boolean;
+  isClaimed: boolean;
+  customNote?: string;
+}
+
 export interface AdminCustomerLink {
   id: number;
   tokenHash: string;
