@@ -358,14 +358,9 @@ export const AvailableBoxGrid: React.FC<AvailableBoxGridProps> = ({
             <Trophy className="w-6 h-6 text-amber-300" />
           </div>
           <div className="flex-1 min-w-0">
-            <div className="flex items-center justify-between">
-              <span className="text-[11px] font-cinzel font-semibold tracking-wider text-amber-400/90 uppercase block truncate">
-                WINNING PRIZES
-              </span>
-              <span className="text-[10px] text-amber-400/70 font-cinzel group-hover:text-amber-300 transition-colors">
-                {showPrizesSection ? 'Hide' : 'Show'}
-              </span>
-            </div>
+            <span className="text-[11px] font-cinzel font-semibold tracking-wider text-amber-400/90 uppercase block truncate">
+              WINNING PRIZES
+            </span>
             <div className="flex items-baseline gap-1.5 flex-wrap">
               <span className="text-2xl sm:text-3xl font-extrabold font-mono-numbers text-amber-300 tracking-tight">
                 {publicPrizes.length}

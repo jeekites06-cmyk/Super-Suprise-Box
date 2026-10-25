@@ -4,7 +4,7 @@
  */
 
 import React, { useEffect, useState } from 'react';
-import { Lock, Gift, Package, ShieldAlert } from 'lucide-react';
+import { Gift, Package, ShieldAlert } from 'lucide-react';
 import { BoxOpeningStage } from './components/BoxOpeningStage';
 import { AvailableBoxGrid } from './components/AvailableBoxGrid';
 import { WinningResult } from './components/WinningResult';
@@ -34,12 +34,6 @@ export default function App() {
     window.addEventListener('popstate', handleLocationCheck);
     return () => window.removeEventListener('popstate', handleLocationCheck);
   }, []);
-
-  const navigateToAdmin = () => {
-    window.history.pushState({}, '', '/admin');
-    setIsAdminView(true);
-    window.scrollTo({ top: 0, behavior: 'smooth' });
-  };
 
   const navigateToCustomer = () => {
     window.history.pushState({}, '', '/');
@@ -180,48 +174,28 @@ export default function App() {
   return (
     <div className="min-h-screen bg-[#050507] text-neutral-100 flex flex-col justify-between font-sans selection:bg-amber-400/30 selection:text-amber-200">
       {/* Brand Header & Top Bar */}
-      <header className="w-full border-b border-amber-500/20 bg-[#07070b]/95 backdrop-blur-md sticky top-0 z-30 px-3 sm:px-8 py-3 shadow-[0_4px_20px_rgba(0,0,0,0.8)]">
-        <div className="max-w-[1520px] mx-auto flex items-center justify-between gap-3">
-          {/* Left: Gift Icon + Brand + Badge */}
-          <div className="flex items-center gap-2 sm:gap-3">
-            <div className="w-8 h-8 sm:w-9 sm:h-9 rounded-xl bg-gradient-to-tr from-amber-500/25 via-yellow-400/20 to-amber-300/10 border border-amber-400/50 flex items-center justify-center shadow-[0_0_15px_rgba(245,158,11,0.25)] shrink-0">
-              <Gift className="w-4 h-4 sm:w-5 sm:h-5 text-amber-300 drop-shadow-sm" />
+      <header className="w-full border-b border-amber-500/20 bg-[#07070b]/95 backdrop-blur-md sticky top-0 z-30 px-3 sm:px-6 lg:px-8 py-3 sm:py-3.5 shadow-[0_4px_20px_rgba(0,0,0,0.8)]">
+        <div className="max-w-[1520px] mx-auto flex items-center justify-between gap-2.5 sm:gap-4">
+          {/* Left: Gift Icon + Brand Logo */}
+          <div
+            onClick={navigateToCustomer}
+            className="flex items-center gap-2 sm:gap-3 cursor-pointer group select-none min-w-0"
+            title="SUPER SURPRISE BOX"
+          >
+            <div className="w-7 h-7 xs:w-8 xs:h-8 sm:w-9 sm:h-9 rounded-xl bg-gradient-to-tr from-amber-500/25 via-yellow-400/20 to-amber-300/10 border border-amber-400/50 flex items-center justify-center shadow-[0_0_15px_rgba(245,158,11,0.25)] group-hover:border-amber-400 transition-all shrink-0">
+              <Gift className="w-3.5 h-3.5 xs:w-4 xs:h-4 sm:w-5 sm:h-5 text-amber-300 drop-shadow-sm group-hover:scale-105 transition-transform" />
             </div>
 
-            <div className="flex items-center gap-2 sm:gap-3">
-              <h1
-                onClick={navigateToCustomer}
-                className="text-base sm:text-xl md:text-2xl font-black tracking-widest font-cinzel text-transparent bg-clip-text bg-gradient-to-r from-amber-100 via-amber-300 to-yellow-500 uppercase cursor-pointer hover:opacity-90 transition-opacity select-none drop-shadow-[0_2px_8px_rgba(245,158,11,0.3)]"
-              >
-                SUPER SURPRISE BOX
-              </h1>
-
-              {/* Beside brand: BATCH 1 • 15,051 BOXES badge */}
-              <div className="hidden md:inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-[#0a0a0f] border border-amber-500/40 text-[11px] text-amber-300 font-cinzel font-semibold tracking-wider shadow-inner">
-                <Package className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                <span>BATCH 1 • 15,051 BOXES</span>
-              </div>
-            </div>
+            <h1 className="text-xs xs:text-sm sm:text-lg md:text-2xl font-black tracking-wider sm:tracking-widest font-cinzel text-transparent bg-clip-text bg-gradient-to-r from-amber-100 via-amber-300 to-yellow-500 uppercase group-hover:opacity-95 transition-opacity drop-shadow-[0_2px_8px_rgba(245,158,11,0.3)] truncate">
+              SUPER SURPRISE BOX
+            </h1>
           </div>
 
-          {/* Right: Gold-bordered ADMIN LOGIN button */}
-          <div className="flex items-center gap-2.5">
-            <div className="md:hidden inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-[#0a0a0f] border border-amber-500/30 text-[9px] text-amber-300 font-cinzel font-semibold">
-              <span>15,051 BOXES</span>
-            </div>
-
-            <a
-              href="/admin"
-              onClick={(e) => {
-                e.preventDefault();
-                navigateToAdmin();
-              }}
-              className="flex items-center gap-2 px-3.5 sm:px-4 py-1.5 sm:py-2 rounded-xl bg-black/80 border border-amber-400/90 hover:bg-amber-400 hover:text-black text-amber-300 text-xs font-cinzel font-bold tracking-wider transition-all duration-200 cursor-pointer shadow-[0_0_15px_rgba(245,158,11,0.2)] hover:shadow-amber-400/40 group shrink-0"
-              title="Open Admin Login"
-            >
-              <Lock className="w-3.5 h-3.5 text-amber-400 group-hover:text-black transition-colors" />
-              <span>ADMIN LOGIN</span>
-            </a>
+          {/* Right: Box Count Badge (Neatly aligned without overflow) */}
+          <div className="inline-flex items-center gap-1 sm:gap-1.5 px-2.5 sm:px-3.5 py-1 sm:py-1.5 rounded-full bg-[#0a0a0f] border border-amber-500/40 text-[10px] sm:text-xs text-amber-300 font-cinzel font-semibold tracking-wider shadow-inner shrink-0 whitespace-nowrap">
+            <Package className="w-3 h-3 sm:w-3.5 sm:h-3.5 text-amber-400 shrink-0" />
+            <span className="hidden sm:inline">BATCH 1 • </span>
+            <span className="font-mono-numbers">15,051 BOXES</span>
           </div>
         </div>
       </header>
@@ -305,9 +279,9 @@ export default function App() {
         ) : null}
       </main>
 
-      {/* Footer with visible Admin Login link */}
-      <footer className="py-8 border-t border-neutral-900/80 bg-[#050507] text-center text-xs text-neutral-500 font-cinzel flex flex-col items-center justify-center gap-3 px-4">
-        <div className="flex items-center gap-2 text-neutral-400 text-xs font-semibold">
+      {/* Brand Footer */}
+      <footer className="py-8 border-t border-neutral-900/80 bg-[#050507] text-center text-xs text-neutral-500 font-cinzel flex flex-col items-center justify-center gap-2.5 px-4">
+        <div className="flex items-center gap-2 text-neutral-400 text-xs font-semibold flex-wrap justify-center">
           <span>SUPER SURPRISE BOX</span>
           <span>·</span>
           <span>BATCH 1 (15,051 BOXES)</span>
@@ -317,22 +291,6 @@ export default function App() {
         <p className="text-[11px] text-neutral-600 max-w-md">
           Official digital inventory & prize allocation. Each box serial corresponds to one verified pre-assigned reward.
         </p>
-        <div className="pt-1">
-          <a
-            href="/admin"
-            onClick={(e) => {
-              e.preventDefault();
-              navigateToAdmin();
-            }}
-            className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-neutral-900/90 border border-neutral-700/80 hover:border-amber-400/70 text-neutral-200 hover:text-amber-300 text-xs font-cinzel font-bold tracking-wider transition-all duration-200 cursor-pointer shadow-md hover:shadow-amber-500/20"
-          >
-            <Lock className="w-4 h-4 text-amber-400" />
-            <span>Admin Login</span>
-          </a>
-        </div>
-        <div className="text-[10px] text-neutral-700 mt-1">
-          Authorized personnel only. Protected by server-side PIN authentication.
-        </div>
       </footer>
     </div>
   );
