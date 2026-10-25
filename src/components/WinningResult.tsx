@@ -1,12 +1,13 @@
 import React, { useEffect, useState } from 'react';
 import confetti from 'canvas-confetti';
-import { Check, Copy, MessageCircle, ShieldCheck, Sparkles, Wifi, Banknote, IndianRupee } from 'lucide-react';
+import { Check, Copy, MessageCircle, ShieldCheck, Sparkles, Wifi, Banknote, IndianRupee, Gift } from 'lucide-react';
 
 interface WinningResultProps {
   serial: string;
   prizeName?: string;
   claimCode?: string;
   openedAt?: string;
+  onBackToBoxes?: () => void;
 }
 
 export const WinningResult: React.FC<WinningResultProps> = ({
@@ -14,6 +15,7 @@ export const WinningResult: React.FC<WinningResultProps> = ({
   prizeName = 'iPhone 17 Pro Max',
   claimCode = `SSB-${serial}-9941`,
   openedAt = new Date().toISOString(),
+  onBackToBoxes,
 }) => {
   const [copied, setCopied] = useState(false);
   const isCash = prizeName.includes('Cash') || prizeName.includes('₹');

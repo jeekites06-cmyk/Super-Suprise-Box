@@ -1625,10 +1625,11 @@ app.get(['/api/public-url', '/api/customer-url'], (req: Request, res: Response):
   const suggestedSharedUrl = currentOrigin.includes('ais-dev-')
     ? currentOrigin.replace('ais-dev-', 'ais-pre-')
     : (configured || currentOrigin);
+  const resolvedPublicUrl = configured || suggestedSharedUrl;
 
   res.json({
     success: true,
-    publicCustomerUrl: configured || (isDevOrigin ? '' : currentOrigin),
+    publicCustomerUrl: resolvedPublicUrl,
     isConfigured: !!configured,
     isDevOrigin,
     currentOrigin,
@@ -1647,10 +1648,11 @@ app.get('/api/admin/customer-url', requireAdminAuth, (req: Request, res: Respons
   const suggestedSharedUrl = currentOrigin.includes('ais-dev-')
     ? currentOrigin.replace('ais-dev-', 'ais-pre-')
     : (configured || currentOrigin);
+  const resolvedPublicUrl = configured || suggestedSharedUrl;
 
   res.json({
     success: true,
-    publicCustomerUrl: configured || (isDevOrigin ? '' : currentOrigin),
+    publicCustomerUrl: resolvedPublicUrl,
     isConfigured: !!configured,
     isDevOrigin,
     currentOrigin,

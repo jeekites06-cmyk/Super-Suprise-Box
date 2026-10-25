@@ -245,25 +245,25 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBackToCustomer
     if (customerUrlConfig?.publicCustomerUrl && customerUrlConfig.publicCustomerUrl.trim()) {
       return customerUrlConfig.publicCustomerUrl.trim();
     }
-    // 2. If current window origin is a non-dev, non-localhost domain, use it
+    // 2. Suggested public shared preview URL (e.g. ais-pre-...)
+    if (customerUrlConfig?.suggestedSharedUrl && customerUrlConfig.suggestedSharedUrl.trim()) {
+      return customerUrlConfig.suggestedSharedUrl.trim();
+    }
+    // 3. If window origin is available
     if (typeof window !== 'undefined') {
       const origin = window.location.origin;
-      if (!origin.includes('ais-dev-') && !origin.includes('localhost') && !origin.includes('127.0.0.1')) {
-        return origin;
+      if (origin.includes('ais-dev-')) {
+        return origin.replace('ais-dev-', 'ais-pre-');
       }
+      return origin;
     }
-    // 3. Fallback: return empty string so we don't accidentally leak or share ais-dev- URLs
     return '';
   };
 
   const handleCopyCustomerLink = () => {
     const commonUrl = getCommonCustomerUrl();
     if (!commonUrl) {
-      showNotification(
-        'error',
-        'Cannot copy internal Google AI Studio dev URL! It requires Google login and displays "403 Forbidden" on mobile. Please configure your public deployed URL below.'
-      );
-      setIsEditingUrl(true);
+      showNotification('error', 'Unable to resolve public customer website URL.');
       return;
     }
 
@@ -273,21 +273,17 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBackToCustomer
         showNotification('success', `Copied public customer link to clipboard: ${commonUrl}`);
         setTimeout(() => setCopiedCommonLink(false), 2500);
       }).catch(() => {
-        showNotification('error', 'Failed to copy public customer link to clipboard.');
+        showNotification('success', `Public customer link: ${commonUrl}`);
       });
     } else {
-      showNotification('success', `Copied public customer link: ${commonUrl}`);
+      showNotification('success', `Public customer link: ${commonUrl}`);
     }
   };
 
   const handleShareWhatsAppCommon = () => {
     const commonUrl = getCommonCustomerUrl();
     if (!commonUrl) {
-      showNotification(
-        'error',
-        'Cannot share internal Google AI Studio dev link on WhatsApp! Recipients opening this link on iPhone / Android will get a "403 — You do not have access to this page" error. Please deploy and set your public URL below.'
-      );
-      setIsEditingUrl(true);
+      showNotification('error', 'Unable to resolve public customer website URL.');
       return;
     }
 
@@ -967,7 +963,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBackToCustomer
             }`}
           >
             <LinkIcon className="w-4 h-4" />
-            <span>ONE-TIME LINKS</span>
+            <span>COMMON CUSTOMER LINK</span>
           </button>
         </div>
 
