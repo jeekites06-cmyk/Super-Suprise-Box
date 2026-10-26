@@ -322,9 +322,18 @@
       "SS00003075": "VIP Flagship Draw"
     },
     "isPrizeShowcaseHidden": false,
-    "publicCustomerUrl": "https://supersurprisebox.example.com"
+    "publicCustomerUrl": "https://super-surprise-box.ai.studio"
   },
-  "customers": {},
+  "customers": {
+    "SSB_V7HHn_queSEhvZww-F6SnGzcmQKrqC_i": {
+      "token": "SSB_V7HHn_queSEhvZww-F6SnGzcmQKrqC_i",
+      "hasClaimed": false,
+      "assignedBox": null,
+      "batchId": 1,
+      "opened": false,
+      "used": false
+    }
+  },
   "customerLinks": {
     "9a893a2c5eba4dfad4ffcd0a9ad63847643f471a55dd8d3890259b87cb09e0b9": {
       "id": 1,
@@ -493,6 +502,24 @@
       "createdBy": "admin",
       "note": "",
       "rawToken": "SSB_wNiKchxsYc9nODFc1VfRscJjYznz3_ip"
+    },
+    "027897f308a05f0d6b67fb24d50733991f91db4de00a5f58836d48b656d6714b": {
+      "id": 13,
+      "tokenHash": "027897f308a05f0d6b67fb24d50733991f91db4de00a5f58836d48b656d6714b",
+      "tokenPrefix": "SSB_V7HH",
+      "boxId": 10,
+      "boxSerial": "SS00000010",
+      "status": "USED",
+      "createdAt": "2026-10-26T09:33:26.310Z",
+      "usedAt": "2026-10-26T09:33:27.610Z",
+      "revokedAt": null,
+      "createdBy": "admin",
+      "note": "Test Link for Alice",
+      "rawToken": "SSB_V7HHn_queSEhvZww-F6SnGzcmQKrqC_i",
+      "boundClientId": "device_alice_1793007207587",
+      "boundClientIp": "127.0.0.1",
+      "boundClientUa": "",
+      "boundAt": "2026-10-26T09:33:27.592Z"
     }
   }
 }

@@ -49,6 +49,8 @@ export interface CustomerSession {
   used?: boolean;
   alreadyUsed?: boolean;
   revoked?: boolean;
+  forbidden?: boolean;
+  isForwardedLink?: boolean;
   error?: string;
   openedAt?: string;
   result?: 'WINNER' | 'BETTER_LUCK' | null;
@@ -129,8 +131,9 @@ export interface AdminCustomerLink {
   tokenPrefix: string;
   boxId: number;
   boxSerial: string;
-  status: 'UNUSED' | 'USED' | 'REVOKED';
+  status: 'UNUSED' | 'ACTIVATED' | 'CLAIMED' | 'USED' | 'REVOKED' | string;
   createdAt: string;
+  activatedAt?: string | null;
   usedAt?: string | null;
   revokedAt?: string | null;
   createdBy?: string;
@@ -138,6 +141,7 @@ export interface AdminCustomerLink {
   rawToken: string;
   url: string;
   isWinner?: boolean;
+  boundClientId?: string | null;
 }
 
 export interface AdminLinksResponse {

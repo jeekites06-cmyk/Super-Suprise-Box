@@ -40,7 +40,9 @@ const ADMIN_TOKEN_KEY = 'ssb_admin_session_token';
 
 export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBackToCustomerView }) => {
   // Auth state
-  const [token, setToken] = useState<string | null>(() => sessionStorage.getItem(ADMIN_TOKEN_KEY));
+  const [token, setToken] = useState<string | null>(
+    () => sessionStorage.getItem(ADMIN_TOKEN_KEY) || localStorage.getItem(ADMIN_TOKEN_KEY)
+  );
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
   const [authChecking, setAuthChecking] = useState<boolean>(true);
   const [pinInput, setPinInput] = useState<string>('');
@@ -49,7 +51,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBackToCustomer
   const [loginLoading, setLoginLoading] = useState<boolean>(false);
 
   // Dashboard tab state: 'boxes' | 'prizes' | 'links'
-  const [activeTab, setActiveTab] = useState<'boxes' | 'prizes' | 'links'>('boxes');
+  const [activeTab, setActiveTab] = useState<'boxes' | 'prizes' | 'links'>('prizes');
 
   // Common Customer Link state
   const [copiedCommonLink, setCopiedCommonLink] = useState<boolean>(false);
@@ -121,35 +123,52 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBackToCustomer
 
   // 1. Verify existing session token on mount
   useEffect(() => {
+    let isMounted = true;
     const verifyToken = async () => {
-      if (!token) {
-        setIsAuthenticated(false);
-        setAuthChecking(false);
+      const stored = sessionStorage.getItem(ADMIN_TOKEN_KEY) || localStorage.getItem(ADMIN_TOKEN_KEY);
+      if (!stored) {
+        if (isMounted) {
+          setIsAuthenticated(false);
+          setAuthChecking(false);
+        }
         return;
       }
 
       try {
         const res = await fetch('/api/admin/verify', {
-          headers: { Authorization: `Bearer ${token}` },
+          headers: { Authorization: `Bearer ${stored}` },
         });
-        if (res.ok) {
-          setIsAuthenticated(true);
-        } else {
-          sessionStorage.removeItem(ADMIN_TOKEN_KEY);
-          setToken(null);
-          setIsAuthenticated(false);
+        if (isMounted) {
+          if (res.ok) {
+            sessionStorage.setItem(ADMIN_TOKEN_KEY, stored);
+            localStorage.setItem(ADMIN_TOKEN_KEY, stored);
+            setToken(stored);
+            setIsAuthenticated(true);
+          } else {
+            sessionStorage.removeItem(ADMIN_TOKEN_KEY);
+            localStorage.removeItem(ADMIN_TOKEN_KEY);
+            setToken(null);
+            setIsAuthenticated(false);
+          }
         }
       } catch {
-        sessionStorage.removeItem(ADMIN_TOKEN_KEY);
-        setToken(null);
-        setIsAuthenticated(false);
+        if (isMounted) {
+          // Keep token if network error occurs
+          setToken(stored);
+          setIsAuthenticated(true);
+        }
       } finally {
-        setAuthChecking(false);
+        if (isMounted) {
+          setAuthChecking(false);
+        }
       }
     };
 
     verifyToken();
-  }, [token]);
+    return () => {
+      isMounted = false;
+    };
+  }, []);
 
   // 2. Fetch Stats
   const fetchStats = useCallback(async () => {
@@ -381,10 +400,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBackToCustomer
     if (isAuthenticated) {
       fetchStats();
       fetchCustomerUrl();
+      fetchPrizes();
       if (activeTab === 'boxes') {
         fetchBoxes(boxesPage, boxesLimit, boxesSearch, boxesFilter);
-      } else if (activeTab === 'prizes') {
-        fetchPrizes();
       }
     }
   }, [isAuthenticated, activeTab, fetchStats, fetchBoxes, fetchPrizes, fetchCustomerUrl, boxesPage, boxesLimit, boxesSearch, boxesFilter]);
@@ -408,9 +426,14 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBackToCustomer
       const data = await res.json();
       if (res.ok && data.token) {
         sessionStorage.setItem(ADMIN_TOKEN_KEY, data.token);
+        localStorage.setItem(ADMIN_TOKEN_KEY, data.token);
+        sessionStorage.removeItem('ssb_preview_customer');
         setToken(data.token);
         setIsAuthenticated(true);
         setPinInput('');
+        if (typeof window !== 'undefined' && window.location.pathname !== '/admin') {
+          window.history.replaceState({}, '', '/admin');
+        }
       } else {
         setLoginError(data.error || 'Authentication failed. Please verify your PIN.');
       }
@@ -434,8 +457,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBackToCustomer
       }
     }
     sessionStorage.removeItem(ADMIN_TOKEN_KEY);
+    localStorage.removeItem(ADMIN_TOKEN_KEY);
+    sessionStorage.removeItem('ssb_preview_customer');
     setToken(null);
     setIsAuthenticated(false);
+    onBackToCustomerView();
   };
 
   // Toggle Single Box Visibility
@@ -763,7 +789,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBackToCustomer
             <button
               type="submit"
               disabled={loginLoading}
-              className="w-full py-2.5 rounded-xl bg-gradient-to-r from-amber-400 via-amber-500 to-yellow-500 text-black font-cinzel font-bold text-xs uppercase tracking-wider hover:opacity-95 transition-opacity disabled:opacity-50 cursor-pointer shadow-md flex items-center justify-center gap-2"
+              className="w-full py-3 rounded-xl bg-gradient-to-r from-amber-400 via-amber-500 to-yellow-500 text-black font-cinzel font-bold text-xs uppercase tracking-wider hover:opacity-95 transition-opacity disabled:opacity-50 cursor-pointer shadow-md flex items-center justify-center gap-2"
             >
               {loginLoading ? (
                 <>
@@ -773,7 +799,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBackToCustomer
               ) : (
                 <>
                   <Unlock className="w-4 h-4 text-black" />
-                  <span>Login</span>
+                  <span>Admin Login</span>
                 </>
               )}
             </button>
@@ -930,7 +956,57 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBackToCustomer
           </div>
         )}
 
-        {/* 2. Main Navigation Tabs */}
+        {/* 2. Common Customer Link Quick Management Bar */}
+        <div className="bg-[#0e0e14] border border-amber-500/30 rounded-2xl p-4 shadow-lg flex flex-col md:flex-row items-center justify-between gap-4">
+          <div className="flex items-center gap-3 min-w-0 w-full md:w-auto">
+            <div className="w-10 h-10 rounded-xl bg-amber-500/20 border border-amber-400/40 flex items-center justify-center text-amber-300 shrink-0">
+              <LinkIcon className="w-5 h-5" />
+            </div>
+            <div className="min-w-0">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-xs font-bold font-cinzel text-white uppercase tracking-wider">
+                  Permanent Public Customer URL
+                </span>
+                <span className="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 text-[10px] font-mono font-bold uppercase">
+                  Reusable by All Customers
+                </span>
+              </div>
+              <p className="text-xs text-amber-300 font-mono font-medium truncate mt-0.5 select-all">
+                {getCommonCustomerUrl() || 'https://super-surprise-box.ai.studio'}
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2.5 w-full md:w-auto shrink-0">
+            <button
+              type="button"
+              onClick={handleCopyCustomerLink}
+              className="flex-1 md:flex-initial py-2.5 px-4 rounded-xl bg-gradient-to-r from-amber-400 to-yellow-400 hover:from-amber-300 hover:to-yellow-300 text-black font-cinzel font-bold text-xs uppercase tracking-wider flex items-center justify-center gap-2 transition-all shadow-md active:scale-95 cursor-pointer whitespace-nowrap"
+            >
+              {copiedCommonLink ? (
+                <>
+                  <Check className="w-4 h-4 text-black stroke-[3]" />
+                  <span>COPIED!</span>
+                </>
+              ) : (
+                <>
+                  <Copy className="w-4 h-4 text-black stroke-[2.5]" />
+                  <span>COPY CUSTOMER LINK</span>
+                </>
+              )}
+            </button>
+            <button
+              type="button"
+              onClick={handleShareWhatsAppCommon}
+              className="flex-1 md:flex-initial py-2.5 px-4 rounded-xl bg-[#25D366] hover:bg-[#20ba5a] text-white font-cinzel font-bold text-xs uppercase tracking-wider flex items-center justify-center gap-2 transition-all shadow-md active:scale-95 cursor-pointer whitespace-nowrap"
+            >
+              <MessageCircle className="w-4 h-4 text-white stroke-[2.5]" />
+              <span>WHATSAPP SHARE</span>
+            </button>
+          </div>
+        </div>
+
+        {/* 3. Main Navigation Tabs */}
         <div className="flex items-center gap-2 border-b border-neutral-800 pb-2">
           <button
             onClick={() => setActiveTab('boxes')}

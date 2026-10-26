@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback, useTransition, useRef } from 'react';
 import { SurpriseBox3D } from './SurpriseBox3D';
 import { AvailableBox, AvailableBoxesResponse, PublicPrize } from '../types/box';
+import { getOrCreateCustomerClientId } from '../utils/customerStore';
 import {
   Search,
   RefreshCw,
@@ -216,10 +217,14 @@ export const AvailableBoxGrid: React.FC<AvailableBoxGridProps> = ({
     setClaimingSerial(serial);
 
     try {
+      const clientId = getOrCreateCustomerClientId();
       const res = await fetch('/api/boxes/claim', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token, boxSerial: serial }),
+        headers: {
+          'Content-Type': 'application/json',
+          'x-customer-client-id': clientId,
+        },
+        body: JSON.stringify({ token, boxSerial: serial, clientId }),
       });
 
       const data = await res.json();

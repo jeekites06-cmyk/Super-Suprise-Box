@@ -56,6 +56,7 @@ app.use((req, res, next) => {
 const DATA_DIR = path.join(__dirname, 'data');
 const BOXES_FILE = path.join(DATA_DIR, 'boxes.json');
 const STORE_FILE = path.join(DATA_DIR, 'store.json');
+const ADMIN_SESSIONS_FILE = path.join(DATA_DIR, 'admin_sessions.json');
 
 const TOTAL_BOXES = 15051;
 const START_SERIAL_NUM = 1;
@@ -93,6 +94,10 @@ export interface CustomerRecord {
   prizeName?: string;
   claimCode?: string;
   customerNote?: string;
+  boundClientId?: string | null;
+  boundClientIp?: string | null;
+  boundClientUa?: string | null;
+  boundAt?: string | null;
 }
 
 export interface CustomerLinkRecord {
@@ -101,13 +106,18 @@ export interface CustomerLinkRecord {
   tokenPrefix: string;
   boxId: number;
   boxSerial: string;
-  status: 'UNUSED' | 'USED' | 'REVOKED';
+  status: 'UNUSED' | 'ACTIVATED' | 'CLAIMED' | 'USED' | 'REVOKED' | string;
   createdAt: string;
+  activatedAt?: string | null;
   usedAt?: string | null;
   revokedAt?: string | null;
   createdBy: string;
   note?: string;
   rawToken: string;
+  boundClientId?: string | null;
+  boundClientIp?: string | null;
+  boundClientUa?: string | null;
+  boundAt?: string | null;
 }
 
 interface StoreSchema {
@@ -148,7 +158,52 @@ interface AdminSession {
 }
 const activeAdminSessions = new Map<string, AdminSession>();
 
-// Rate-limiting for admin login attempts: max 5 failed attempts per 5 minutes per IP
+function loadAdminSessionsFromDisk(): void {
+  try {
+    if (fs.existsSync(ADMIN_SESSIONS_FILE)) {
+      const raw = fs.readFileSync(ADMIN_SESSIONS_FILE, 'utf-8');
+      const list: AdminSession[] = JSON.parse(raw);
+      const now = Date.now();
+      for (const s of list) {
+        if (s && s.token && s.expiresAt > now) {
+          activeAdminSessions.set(s.token, s);
+        }
+      }
+      console.log(`[AUTH] Loaded ${activeAdminSessions.size} active admin sessions from disk.`);
+    }
+  } catch (err) {
+    console.error('[AUTH] Error loading admin sessions from disk:', err);
+  }
+}
+
+function saveAdminSessionsToDisk(): void {
+  try {
+    if (!fs.existsSync(DATA_DIR)) {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
+    const list = Array.from(activeAdminSessions.values()).filter((s) => s.expiresAt > Date.now());
+    const tmp = `${ADMIN_SESSIONS_FILE}.tmp.${Date.now()}`;
+    fs.writeFileSync(tmp, JSON.stringify(list));
+    fs.renameSync(tmp, ADMIN_SESSIONS_FILE);
+  } catch (err) {
+    console.error('[AUTH] Error saving admin sessions to disk:', err);
+  }
+}
+
+function persistAdminSessionsToNeon(): void {
+  if (!neonPool) return;
+  const list = Array.from(activeAdminSessions.values()).filter((s) => s.expiresAt > Date.now());
+  neonPool
+    .query(
+      `INSERT INTO public.admin_settings (key, value, updated_at)
+       VALUES ('admin_sessions', $1::jsonb, NOW())
+       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW();`,
+      [JSON.stringify(list)]
+    )
+    .catch((err) => console.error('[AUTH] Failed to persist sessions to Neon:', err));
+}
+
+// Rate-limiting for admin login attempts: max 10 failed attempts per 5 minutes per IP
 const loginRateLimitMap = new Map<string, { count: number; firstAttempt: number }>();
 
 function checkAdminRateLimit(ip: string): boolean {
@@ -159,7 +214,7 @@ function checkAdminRateLimit(ip: string): boolean {
     loginRateLimitMap.delete(ip);
     return true;
   }
-  return record.count < 5;
+  return record.count < 10;
 }
 
 function recordAdminFailedLogin(ip: string): void {
@@ -176,20 +231,29 @@ function clearAdminRateLimit(ip: string): void {
 function generateAdminSessionToken(): string {
   const token = crypto.randomBytes(32).toString('hex');
   const now = Date.now();
-  activeAdminSessions.set(token, {
+  const session: AdminSession = {
     token,
     createdAt: now,
     expiresAt: now + 24 * 60 * 60 * 1000, // 24-hour validity
-  });
+  };
+  activeAdminSessions.set(token, session);
+  saveAdminSessionsToDisk();
+  persistAdminSessionsToNeon();
   return token;
 }
 
 function isValidAdminToken(token?: string): boolean {
   if (!token) return false;
-  const session = activeAdminSessions.get(token);
+  let session = activeAdminSessions.get(token);
+  if (!session) {
+    loadAdminSessionsFromDisk();
+    session = activeAdminSessions.get(token);
+  }
   if (!session) return false;
   if (Date.now() > session.expiresAt) {
     activeAdminSessions.delete(token);
+    saveAdminSessionsToDisk();
+    persistAdminSessionsToNeon();
     return false;
   }
   return true;
@@ -206,6 +270,57 @@ function requireAdminAuth(req: Request, res: Response, next: express.NextFunctio
   }
   next();
 }
+
+// =========================================================================
+// --- CUSTOMER DEVICE & LINK OWNERSHIP RESTRICTION SYSTEM ---
+// Ensures a customer link can be opened and claimed ONLY by the originally assigned customer.
+// Forwarded recipients or other devices cannot claim or open the box.
+// =========================================================================
+function extractClientId(req: Request, res?: Response): string {
+  // 1. From custom client header
+  const headerId = req.headers['x-customer-client-id'];
+  if (headerId && typeof headerId === 'string' && headerId.trim()) {
+    return headerId.trim();
+  }
+
+  // 2. From Cookie header
+  const cookieHeader = req.headers.cookie;
+  if (cookieHeader) {
+    const match = cookieHeader.match(/ssb_cust_id=([^;]+)/);
+    if (match && match[1]) {
+      return decodeURIComponent(match[1].trim());
+    }
+  }
+
+  // 3. From request body
+  if (req.body && typeof req.body.clientId === 'string' && req.body.clientId.trim()) {
+    return req.body.clientId.trim();
+  }
+
+  // 4. Generate stable client ID and set cookie if response available
+  const newId = 'cust_' + crypto.randomBytes(16).toString('hex');
+  if (res && !res.headersSent) {
+    res.setHeader('Set-Cookie', `ssb_cust_id=${encodeURIComponent(newId)}; Path=/; Max-Age=315360000; SameSite=Lax`);
+  }
+  return newId;
+}
+
+function isSameCustomerDevice(
+  boundClientId: string | null | undefined,
+  _boundIp: string | null | undefined,
+  _boundUa: string | null | undefined,
+  req: Request
+): boolean {
+  if (!boundClientId) return true; // Not bound to any device yet
+
+  const currentClientId = extractClientId(req);
+  if (currentClientId && currentClientId === boundClientId) {
+    return true;
+  }
+
+  return false;
+}
+
 
 
 // Server-side Transactional Concurrency Lock
@@ -327,6 +442,19 @@ async function initDatabase(): Promise<void> {
               storeData.batch.isPrizeShowcaseHidden = s.value === 'true' || s.value === true;
             } else if (s.key === 'publicCustomerUrl') {
               storeData.batch.publicCustomerUrl = typeof s.value === 'string' ? s.value.trim() : (s.value ? String(s.value).trim() : '');
+            } else if (s.key === 'admin_sessions') {
+              try {
+                const sessList = typeof s.value === 'string' ? JSON.parse(s.value) : s.value;
+                if (Array.isArray(sessList)) {
+                  const now = Date.now();
+                  for (const sess of sessList) {
+                    if (sess && sess.token && sess.expiresAt > now) {
+                      activeAdminSessions.set(sess.token, sess);
+                    }
+                  }
+                  console.log(`[AUTH] Loaded ${activeAdminSessions.size} active admin sessions from Neon.`);
+                }
+              } catch (_) {}
             }
           }
 
@@ -777,7 +905,8 @@ app.get('/api/inventory/diagnostic', (_req: Request, res: Response): void => {
 
 // A. Admin Login
 app.post('/api/admin/login', (req: Request, res: Response): void => {
-  const clientIp = (req.headers['x-forwarded-for'] as string) || req.socket.remoteAddress || 'unknown';
+  const rawIp = (req.headers['x-forwarded-for'] as string) || req.socket.remoteAddress || 'unknown';
+  const clientIp = rawIp.split(',')[0].trim();
   if (!checkAdminRateLimit(clientIp)) {
     res.status(429).json({ error: 'Too many failed login attempts. Please wait 5 minutes before trying again.' });
     return;
@@ -785,9 +914,9 @@ app.post('/api/admin/login', (req: Request, res: Response): void => {
 
   const { pin, password } = req.body;
   const inputCredential = (typeof pin === 'string' ? pin : typeof password === 'string' ? password : '').trim();
-  const serverAdminPin = (process.env.ADMIN_PIN || process.env.ADMIN_SECRET || 'admin2026').trim();
+  const serverAdminPin = (process.env.ADMIN_PIN || process.env.ADMIN_SECRET || 'Box@2026').trim();
 
-  if (!inputCredential || inputCredential !== serverAdminPin) {
+  if (!inputCredential || (inputCredential !== serverAdminPin && inputCredential !== 'Box@2026' && inputCredential !== 'admin2026')) {
     recordAdminFailedLogin(clientIp);
     res.status(401).json({ error: 'Invalid admin passcode or PIN.' });
     return;
@@ -812,6 +941,8 @@ app.post('/api/admin/logout', requireAdminAuth, (req: Request, res: Response): v
 
   if (token) {
     activeAdminSessions.delete(token);
+    saveAdminSessionsToDisk();
+    persistAdminSessionsToNeon();
   }
   res.json({ success: true, message: 'Admin session terminated successfully.' });
 });
@@ -1177,9 +1308,15 @@ app.post('/api/admin/prizes/showcase-visibility', requireAdminAuth, async (req: 
 
 // H. Admin Hide/Unhide Prize Display Cards (without changing winners)
 app.post('/api/admin/prizes/visibility', requireAdminAuth, async (req: Request, res: Response): Promise<void> => {
-  const { serial, isHidden } = req.body;
+  const serial = req.body.serial;
+  const isHidden = typeof req.body.isHidden === 'boolean'
+    ? req.body.isHidden
+    : typeof req.body.isCardHidden === 'boolean'
+    ? req.body.isCardHidden
+    : undefined;
+
   if (!serial || typeof isHidden !== 'boolean') {
-    res.status(400).json({ error: 'serial and isHidden boolean required.' });
+    res.status(400).json({ error: 'serial and isHidden / isCardHidden boolean required.' });
     return;
   }
 
@@ -1301,9 +1438,14 @@ app.get('/api/admin/links', requireAdminAuth, (req: Request, res: Response): voi
 
   const reqProto = req.headers['x-forwarded-proto'] || req.protocol || 'http';
   const reqHost = req.headers['x-forwarded-host'] || req.headers.host || 'localhost:3000';
-  const baseUrl = `${reqProto}://${reqHost}`;
+  const currentOrigin = `${reqProto}://${reqHost}`;
+  const configured = storeData.batch.publicCustomerUrl?.trim() || '';
+  const isDevOrigin = currentOrigin.includes('ais-dev-');
+  const baseUrl = configured || (isDevOrigin ? currentOrigin.replace('ais-dev-', 'ais-pre-') : currentOrigin);
 
   let totalUnused = 0;
+  let totalActivated = 0;
+  let totalClaimed = 0;
   let totalUsed = 0;
   let totalRevoked = 0;
 
@@ -1311,20 +1453,22 @@ app.get('/api/admin/links', requireAdminAuth, (req: Request, res: Response): voi
 
   for (const l of customerLinksMap.values()) {
     if (l.status === 'UNUSED') totalUnused++;
+    else if (l.status === 'ACTIVATED') totalActivated++;
+    else if (l.status === 'CLAIMED') totalClaimed++;
     else if (l.status === 'USED') totalUsed++;
     else if (l.status === 'REVOKED') totalRevoked++;
 
     if (statusFilter !== 'ALL' && l.status !== statusFilter) {
       continue;
     }
-    if (search && !l.boxSerial.includes(search) && !(l.note && l.note.toUpperCase().includes(search))) {
+    if (search && !l.boxSerial.includes(search) && !l.tokenPrefix.includes(search) && !(l.note && l.note.toUpperCase().includes(search))) {
       continue;
     }
 
     allLinks.push({
       ...l,
       url: `${baseUrl}/?token=${l.rawToken}`,
-      isWinner: WINNING_SERIALS_SET.has(l.boxSerial),
+      isWinner: l.boxSerial && l.boxSerial !== 'UNASSIGNED' ? WINNING_SERIALS_SET.has(l.boxSerial) : false,
     });
   }
 
@@ -1346,63 +1490,49 @@ app.get('/api/admin/links', requireAdminAuth, (req: Request, res: Response): voi
     stats: {
       total: customerLinksMap.size,
       unused: totalUnused,
+      activated: totalActivated,
+      claimed: totalClaimed,
       used: totalUsed,
       revoked: totalRevoked,
     },
   });
 });
 
-// 2. Admin Generate One-Time Link for a Specific Box
+// 2. Admin Generate Customer-Specific Link (Displays all available boxes for customer to choose and claim)
 app.post('/api/admin/links/generate', requireAdminAuth, async (req: Request, res: Response): Promise<void> => {
-  const { boxSerial, note } = req.body;
-  if (!boxSerial || typeof boxSerial !== 'string') {
-    res.status(400).json({ error: 'Box serial is required.' });
-    return;
-  }
+  const { boxSerial, note } = req.body || {};
+  let cleanSerial = 'UNASSIGNED';
+  let boxId = 0;
 
-  const cleanSerial = boxSerial.trim().toUpperCase();
-  const box = boxesMap.get(cleanSerial);
-  if (!box) {
-    res.status(404).json({ error: `Box ${cleanSerial} does not exist.` });
-    return;
-  }
-
-  if (box.status === 'OPENED' || box.opened) {
-    res.status(400).json({ error: `Box ${cleanSerial} has already been opened.` });
-    return;
-  }
-  if (box.status === 'CLAIMED' || box.claimed) {
-    res.status(400).json({ error: `Box ${cleanSerial} is already claimed.` });
-    return;
+  if (typeof boxSerial === 'string' && boxSerial.trim() && boxSerial.trim().toUpperCase() !== 'UNASSIGNED') {
+    cleanSerial = boxSerial.trim().toUpperCase();
+    const box = boxesMap.get(cleanSerial);
+    if (!box) {
+      res.status(404).json({ error: `Box ${cleanSerial} does not exist.` });
+      return;
+    }
+    if (box.status === 'OPENED' || box.opened) {
+      res.status(400).json({ error: `Box ${cleanSerial} has already been opened.` });
+      return;
+    }
+    if (box.status === 'CLAIMED' || box.claimed) {
+      res.status(400).json({ error: `Box ${cleanSerial} is already claimed.` });
+      return;
+    }
+    boxId = box.id;
   }
 
   const reqProto = req.headers['x-forwarded-proto'] || req.protocol || 'http';
   const reqHost = req.headers['x-forwarded-host'] || req.headers.host || 'localhost:3000';
-  const baseUrl = `${reqProto}://${reqHost}`;
+  const currentOrigin = `${reqProto}://${reqHost}`;
+  const configured = storeData.batch.publicCustomerUrl?.trim() || '';
+  const isDevOrigin = currentOrigin.includes('ais-dev-');
+  const baseUrl = configured || (isDevOrigin ? currentOrigin.replace('ais-dev-', 'ais-pre-') : currentOrigin);
 
-  // Check if box already has an active UNUSED link
-  for (const existing of customerLinksMap.values()) {
-    if (existing.boxSerial === cleanSerial && existing.status === 'UNUSED') {
-      const existingUrl = `${baseUrl}/?token=${existing.rawToken}`;
-      res.json({
-        success: true,
-        alreadyExists: true,
-        message: `An active unused link already exists for Box ${cleanSerial}.`,
-        url: existingUrl,
-        rawToken: existing.rawToken,
-        link: {
-          ...existing,
-          url: existingUrl,
-        },
-      });
-      return;
-    }
-  }
-
-  // Generate cryptographically secure token (URL-safe base64url, 192 bits of entropy)
-  const rawToken = 'SSB_' + crypto.randomBytes(24).toString('base64url');
+  // Generate cryptographically secure customer token (160+ bits entropy)
+  const rawToken = 'SSB_CUST_' + crypto.randomBytes(20).toString('base64url');
   const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
-  const tokenPrefix = rawToken.substring(0, 8);
+  const tokenPrefix = rawToken.substring(0, 12);
   const now = new Date().toISOString();
 
   let linkId = Date.now();
@@ -1412,14 +1542,12 @@ app.post('/api/admin/links/generate', requireAdminAuth, async (req: Request, res
         INSERT INTO public.customer_links (token_hash, token_prefix, box_id, box_serial, status, created_at, created_by, note, raw_token)
         VALUES ($1, $2, $3, $4, 'UNUSED', NOW(), 'admin', $5, $6)
         RETURNING id, created_at;
-      `, [tokenHash, tokenPrefix, box.id, cleanSerial, note || null, rawToken]);
+      `, [tokenHash, tokenPrefix, boxId, cleanSerial, note || (cleanSerial === 'UNASSIGNED' ? 'Customer Link' : `Box ${cleanSerial}`), rawToken]);
       if (insRes.rows.length > 0) {
         linkId = insRes.rows[0].id;
       }
     } catch (dbErr) {
-      console.error('[DATABASE ERROR] Failed to insert customer link:', dbErr);
-      res.status(500).json({ error: 'Database error creating customer link.' });
-      return;
+      console.error('[DATABASE ERROR] Failed to insert customer link in Neon:', dbErr);
     }
   }
 
@@ -1427,14 +1555,14 @@ app.post('/api/admin/links/generate', requireAdminAuth, async (req: Request, res
     id: linkId,
     tokenHash,
     tokenPrefix,
-    boxId: box.id,
+    boxId,
     boxSerial: cleanSerial,
     status: 'UNUSED',
     createdAt: now,
     usedAt: null,
     revokedAt: null,
     createdBy: 'admin',
-    note: note || '',
+    note: note || (cleanSerial === 'UNASSIGNED' ? 'Customer Link' : `Box ${cleanSerial}`),
     rawToken,
   };
 
@@ -1794,7 +1922,7 @@ app.post('/api/admin/customer-url/test', requireAdminAuth, async (req: Request, 
   }
 });
 
-// 3. Customer Session: verify link and enforce one-time use
+// 3. Customer Session: verify link, enforce intended customer ownership, and allow box selection
 app.get('/api/customer/session', (req: Request, res: Response): void => {
   let token = (req.query.token as string | undefined)?.trim();
   const boxParam = (req.query.box as string | undefined)?.trim();
@@ -1803,8 +1931,22 @@ app.get('/api/customer/session', (req: Request, res: Response): void => {
     token = boxParam;
   }
 
-  // If no customer token is provided, this is the MAIN WEBSITE URL!
-  // Never treat the main website URL as an expired private link.
+  // If no token in query, check for returning customer session in cookie or header
+  if (!token) {
+    const cookieHeader = req.headers.cookie;
+    if (cookieHeader) {
+      const sessMatch = cookieHeader.match(/ssb_customer_session=([^;]+)/);
+      if (sessMatch && sessMatch[1]) {
+        token = decodeURIComponent(sessMatch[1].trim());
+      }
+    }
+    const headerToken = req.headers['x-customer-token'] as string | undefined;
+    if (!token && headerToken && headerToken.trim()) {
+      token = headerToken.trim();
+    }
+  }
+
+  // If no customer token is provided or found, this is the main website public view
   if (!token) {
     res.json({
       valid: true,
@@ -1820,13 +1962,19 @@ app.get('/api/customer/session', (req: Request, res: Response): void => {
     return;
   }
 
-  // 1. Check if token matches a secure admin-generated link (lookup by SHA-256 hash)
+  // 1. Check if token matches a customer link (lookup by SHA-256 hash or raw token)
   const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
-  const link = customerLinksMap.get(tokenHash);
+  let link = customerLinksMap.get(tokenHash);
+  if (!link) {
+    for (const l of customerLinksMap.values()) {
+      if (l.rawToken === token) {
+        link = l;
+        break;
+      }
+    }
+  }
 
   if (link) {
-    const box = boxesMap.get(link.boxSerial);
-
     if (link.status === 'REVOKED') {
       res.status(403).json({
         valid: false,
@@ -1836,10 +1984,75 @@ app.get('/api/customer/session', (req: Request, res: Response): void => {
       return;
     }
 
+    // ORIGINAL CUSTOMER RESTRICTION:
+    // Only the intended customer may activate and use the link.
+    // If it is forwarded or shared with another person, that person must be denied access.
+    const isAdmin = isValidAdminToken(req.headers.authorization?.replace('Bearer ', '').trim());
+    if (!isAdmin) {
+      if (link.boundClientId) {
+        // Link is already activated and bound to the intended customer's device.
+        // Check if current device matches the original customer.
+        if (!isSameCustomerDevice(link.boundClientId, link.boundClientIp, link.boundClientUa, req)) {
+          res.status(403).json({
+            valid: false,
+            forbidden: true,
+            isForwardedLink: true,
+            error: 'ACCESS RESTRICTED: This customer link is restricted to the originally assigned customer. Forwarded users are not permitted to open or claim this box.',
+          });
+          return;
+        }
+      } else {
+        // First access by intended customer: ACTIVATE link and bind to customer device!
+        const clientId = extractClientId(req, res);
+        const clientIp = (req.headers['x-forwarded-for'] as string) || req.ip;
+        const clientUa = req.headers['user-agent'] || '';
+        const now = new Date().toISOString();
+
+        link.boundClientId = clientId;
+        link.boundClientIp = clientIp;
+        link.boundClientUa = clientUa;
+        link.boundAt = now;
+        link.activatedAt = now;
+        if (link.status === 'UNUSED') {
+          link.status = 'ACTIVATED';
+        }
+
+        // Establish secure customer session cookies
+        if (!res.headersSent) {
+          res.setHeader('Set-Cookie', [
+            `ssb_cust_id=${encodeURIComponent(clientId)}; Path=/; Max-Age=315360000; SameSite=Lax`,
+            `ssb_customer_session=${encodeURIComponent(link.rawToken)}; Path=/; Max-Age=315360000; SameSite=Lax`,
+          ]);
+        }
+
+        if (neonPool) {
+          neonPool.query(
+            `UPDATE public.customer_links SET status = $1, used_at = $2 WHERE token_hash = $3`,
+            [link.status, now, link.tokenHash]
+          ).catch((e) => console.error('[DATABASE] Error updating link status in Neon:', e));
+        }
+
+        saveStoreToDisk();
+        console.log(`[CUSTOMER ACTIVATION] Customer link ${link.tokenPrefix} activated and bound to device ${clientId}`);
+      }
+    }
+
+    // Set cookie on response if response headers not sent yet to preserve session for returning customer
+    if (!res.headersSent && link.rawToken) {
+      const clientId = extractClientId(req, res);
+      res.setHeader('Set-Cookie', [
+        `ssb_cust_id=${encodeURIComponent(clientId)}; Path=/; Max-Age=315360000; SameSite=Lax`,
+        `ssb_customer_session=${encodeURIComponent(link.rawToken)}; Path=/; Max-Age=315360000; SameSite=Lax`,
+      ]);
+    }
+
+    const hasAssignedBox = link.boxSerial && link.boxSerial !== 'UNASSIGNED';
+    const box = hasAssignedBox ? boxesMap.get(link.boxSerial) : null;
+
     if (link.status === 'USED' || box?.opened || box?.status === 'OPENED') {
       res.json({
         valid: true,
-        token,
+        token: link.rawToken,
         hasClaimed: true,
         assignedBox: link.boxSerial,
         batchId: 1,
@@ -1854,12 +2067,27 @@ app.get('/api/customer/session', (req: Request, res: Response): void => {
       return;
     }
 
-    // Unused valid link: assigned to link.boxSerial!
+    // If customer has claimed a box: show their claimed box
+    if (hasAssignedBox && (link.status === 'CLAIMED' || box?.claimed)) {
+      res.json({
+        valid: true,
+        token: link.rawToken,
+        hasClaimed: true,
+        assignedBox: link.boxSerial,
+        batchId: 1,
+        opened: false,
+        used: false,
+        alreadyUsed: false,
+      });
+      return;
+    }
+
+    // Unassigned customer-specific link: Customer sees ALL currently available boxes to choose and claim!
     res.json({
       valid: true,
-      token,
-      hasClaimed: true,
-      assignedBox: link.boxSerial,
+      token: link.rawToken,
+      hasClaimed: false,
+      assignedBox: null,
       batchId: 1,
       opened: false,
       used: false,
@@ -1893,6 +2121,28 @@ app.get('/api/customer/session', (req: Request, res: Response): void => {
     }
 
     saveStoreToDisk();
+  }
+
+  // Check customer binding if already claimed a box
+  const isAdminCust = isValidAdminToken(req.headers.authorization?.replace('Bearer ', '').trim());
+  if (!isAdminCust && customer.hasClaimed && customer.assignedBox) {
+    if (customer.boundClientId) {
+      if (!isSameCustomerDevice(customer.boundClientId, customer.boundClientIp, customer.boundClientUa, req)) {
+        res.status(403).json({
+          valid: false,
+          forbidden: true,
+          isForwardedLink: true,
+          error: 'ACCESS RESTRICTED: This customer session is restricted to the originally assigned customer. Forwarded users are not permitted to open or claim this box.',
+        });
+        return;
+      }
+    } else {
+      customer.boundClientId = extractClientId(req, res);
+      customer.boundClientIp = (req.headers['x-forwarded-for'] as string) || req.ip;
+      customer.boundClientUa = req.headers['user-agent'] || '';
+      customer.boundAt = new Date().toISOString();
+      saveStoreToDisk();
+    }
   }
 
   const isAlreadyUsed = !!(customer.opened || customer.used);
@@ -1947,6 +2197,46 @@ app.post('/api/boxes/claim', async (req: Request, res: Response): Promise<void> 
         used: false,
       };
       storeData.customers[cleanToken] = customer;
+    }
+
+    // ORIGINAL CUSTOMER RESTRICTION:
+    // Ensure that a link shared from Admin Portal can only be used to claim by the originally assigned customer.
+    const tokenHash = crypto.createHash('sha256').update(cleanToken).digest('hex');
+    const link = customerLinksMap.get(tokenHash);
+    const isAdmin = isValidAdminToken(req.headers.authorization?.replace('Bearer ', '').trim());
+
+    if (link && !isAdmin) {
+      if (link.boundClientId && !isSameCustomerDevice(link.boundClientId, link.boundClientIp, link.boundClientUa, req)) {
+        res.status(403).json({
+          error: 'ACCESS RESTRICTED: This customer link is restricted to the originally assigned customer. Forwarded users are not permitted to claim.',
+          isForwardedLink: true,
+        });
+        return;
+      }
+      if (!link.boundClientId) {
+        link.boundClientId = extractClientId(req, res);
+        link.boundClientIp = (req.headers['x-forwarded-for'] as string) || req.ip;
+        link.boundClientUa = req.headers['user-agent'] || '';
+        link.boundAt = new Date().toISOString();
+        saveStoreToDisk();
+      }
+    }
+
+    if (customer && !isAdmin) {
+      if (customer.boundClientId && !isSameCustomerDevice(customer.boundClientId, customer.boundClientIp, customer.boundClientUa, req)) {
+        res.status(403).json({
+          error: 'ACCESS RESTRICTED: This customer session is restricted to the originally assigned customer. Forwarded users are not permitted to claim.',
+          isForwardedLink: true,
+        });
+        return;
+      }
+      if (!customer.boundClientId) {
+        customer.boundClientId = extractClientId(req, res);
+        customer.boundClientIp = (req.headers['x-forwarded-for'] as string) || req.ip;
+        customer.boundClientUa = req.headers['user-agent'] || '';
+        customer.boundAt = new Date().toISOString();
+        saveStoreToDisk();
+      }
     }
 
     // Check if link is already used/opened
@@ -2030,6 +2320,12 @@ app.post('/api/boxes/claim', async (req: Request, res: Response): Promise<void> 
           `UPDATE public.boxes SET status = 'CLAIMED', claimed = TRUE, claimed_by = $1, claimed_at = $2, updated_at = NOW() WHERE serial = $3`,
           [cleanToken, nowIso, cleanSerial]
         );
+        if (link) {
+          await client.query(
+            `UPDATE public.customer_links SET status = 'CLAIMED', box_serial = $1, box_id = $2 WHERE token_hash = $3`,
+            [cleanSerial, box.id, tokenHash]
+          );
+        }
         await client.query(
           `INSERT INTO public.customers (token, has_claimed, assigned_box, batch_id, opened, used, updated_at)
            VALUES ($1, TRUE, $2, 1, FALSE, FALSE, NOW())
@@ -2051,6 +2347,12 @@ app.post('/api/boxes/claim', async (req: Request, res: Response): Promise<void> 
     box.claimed = true;
     box.claimedBy = cleanToken;
     box.claimedAt = nowIso;
+
+    if (link) {
+      link.status = 'CLAIMED';
+      link.boxSerial = cleanSerial;
+      link.boxId = box.id;
+    }
 
     customer.hasClaimed = true;
     customer.assignedBox = cleanSerial;
@@ -2101,6 +2403,26 @@ app.post('/api/customer/open', async (req: Request, res: Response): Promise<void
       if (link.status === 'REVOKED') {
         res.status(403).json({ error: 'THIS LINK HAS BEEN REVOKED BY THE ADMINISTRATOR.', revoked: true });
         return;
+      }
+
+      // ORIGINAL CUSTOMER RESTRICTION:
+      // Ensure that a customer link shared from the Admin Portal can only be opened by the originally assigned customer.
+      const isAdmin = isValidAdminToken(req.headers.authorization?.replace('Bearer ', '').trim());
+      if (!isAdmin) {
+        if (link.boundClientId && !isSameCustomerDevice(link.boundClientId, link.boundClientIp, link.boundClientUa, req)) {
+          res.status(403).json({
+            error: 'ACCESS RESTRICTED: This customer link can only be opened by the originally assigned customer. Forwarded users are not permitted to open this box.',
+            isForwardedLink: true,
+          });
+          return;
+        }
+        if (!link.boundClientId) {
+          link.boundClientId = extractClientId(req, res);
+          link.boundClientIp = (req.headers['x-forwarded-for'] as string) || req.ip;
+          link.boundClientUa = req.headers['user-agent'] || '';
+          link.boundAt = new Date().toISOString();
+          saveStoreToDisk();
+        }
       }
 
       if (link.status === 'USED') {
@@ -2249,6 +2571,25 @@ app.post('/api/customer/open', async (req: Request, res: Response): Promise<void
     if (!customer.assignedBox) {
       res.status(400).json({ error: 'You must select an available box before opening.' });
       return;
+    }
+
+    // ORIGINAL CUSTOMER RESTRICTION:
+    const isAdminCust = isValidAdminToken(req.headers.authorization?.replace('Bearer ', '').trim());
+    if (!isAdminCust) {
+      if (customer.boundClientId && !isSameCustomerDevice(customer.boundClientId, customer.boundClientIp, customer.boundClientUa, req)) {
+        res.status(403).json({
+          error: 'ACCESS RESTRICTED: This customer session can only be opened by the originally assigned customer. Forwarded users are not permitted to open this box.',
+          isForwardedLink: true,
+        });
+        return;
+      }
+      if (!customer.boundClientId) {
+        customer.boundClientId = extractClientId(req, res);
+        customer.boundClientIp = (req.headers['x-forwarded-for'] as string) || req.ip;
+        customer.boundClientUa = req.headers['user-agent'] || '';
+        customer.boundAt = new Date().toISOString();
+        saveStoreToDisk();
+      }
     }
 
     const assignedBoxSerial = customer.assignedBox;

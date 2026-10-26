@@ -39,6 +39,21 @@ export function saveLocalClaimedBox(token: string, serial: string): void {
   }
 }
 
+const CLIENT_ID_KEY = 'ssb_cust_device_id';
+
+export function getOrCreateCustomerClientId(): string {
+  try {
+    let id = localStorage.getItem(CLIENT_ID_KEY);
+    if (!id) {
+      id = 'dev_c_' + Math.random().toString(36).substring(2, 10) + Date.now().toString(36);
+      localStorage.setItem(CLIENT_ID_KEY, id);
+    }
+    return id;
+  } catch {
+    return 'dev_c_default';
+  }
+}
+
 /**
  * Fetch customer session with authoritative server enforcement
  */
@@ -58,12 +73,16 @@ export async function fetchCustomerSession(token?: string | null): Promise<Custo
   }
 
   const cleanToken = token.trim();
+  const clientId = getOrCreateCustomerClientId();
 
   try {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 4000);
 
     const res = await fetch(`/api/customer/session?token=${encodeURIComponent(cleanToken)}`, {
+      headers: {
+        'x-customer-client-id': clientId,
+      },
       signal: controller.signal,
     });
     clearTimeout(timeoutId);
@@ -90,7 +109,12 @@ export async function fetchCustomerSession(token?: string | null): Promise<Custo
       const errData = await res.json().catch(() => ({}));
       throw new Error(errData.error || 'Invalid or unregistered private link.');
     }
-  } catch {
+  } catch (err: unknown) {
+    const errMsg = (err as Error)?.message || '';
+    if (errMsg.includes('RESTRICTED') || errMsg.includes('assigned customer') || errMsg.includes('forwarded')) {
+      throw err;
+    }
+
     // Graceful fallback from local storage cache if offline
     const localBox = getLocalClaimedBox(cleanToken);
     const cachedResult = localBox ? getLocalCustomerResult(cleanToken) : null;
@@ -117,14 +141,18 @@ export async function fetchCustomerSession(token?: string | null): Promise<Custo
  */
 export async function openCustomerBox(token: string, boxSerial: string): Promise<OpenResult> {
   const cleanToken = (token || boxSerial || '').trim();
+  const clientId = getOrCreateCustomerClientId();
 
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 6000);
 
   const res = await fetch('/api/customer/open', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ token: cleanToken, boxSerial }),
+    headers: {
+      'Content-Type': 'application/json',
+      'x-customer-client-id': clientId,
+    },
+    body: JSON.stringify({ token: cleanToken, boxSerial, clientId }),
     signal: controller.signal,
   });
   clearTimeout(timeoutId);
