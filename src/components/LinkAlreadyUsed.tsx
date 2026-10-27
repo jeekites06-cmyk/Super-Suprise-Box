@@ -29,16 +29,16 @@ export const LinkAlreadyUsed: React.FC<LinkAlreadyUsedProps> = ({
       {/* Lock Status Badge */}
       <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-neutral-900 border border-neutral-700 text-neutral-400 text-xs font-semibold tracking-wider uppercase mb-6">
         <Lock className="w-3.5 h-3.5 text-amber-400" />
-        <span>One-Time Link Expired</span>
+        <span>Link Already Used · No Further Claim Allowed</span>
       </div>
 
       {/* Required Exact Headline from Prompt */}
-      <h1 className="text-2xl sm:text-3xl font-extrabold tracking-tight text-white uppercase font-cinzel mb-4">
-        THIS LINK HAS ALREADY BEEN USED.
+      <h1 className="text-2xl sm:text-4xl font-extrabold tracking-tight text-white uppercase font-cinzel mb-4">
+        BETTER LUCK NEXT TIME
       </h1>
 
       <p className="text-neutral-400 text-xs sm:text-sm mb-6 leading-relaxed">
-        Each private link can only be opened once. The assigned Surprise Box has already been revealed and its result is permanently locked in the database.
+        This purchase link has already been used and cannot be claimed again. The assigned Surprise Box has already been revealed and its result is permanently locked in the database.
       </p>
 
       {/* Record Summary Box */}

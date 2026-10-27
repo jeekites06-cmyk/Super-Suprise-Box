@@ -2,6 +2,8 @@ import { CustomerSession, OpenResult } from '../types/box';
 
 const STORAGE_PREFIX = 'ssb_cust_result_';
 const CLAIM_PREFIX = 'ssb_cust_claim_';
+const CLIENT_ID_KEY = 'ssb_cust_device_id';
+const SESSION_TOKEN_KEY = 'ssb_customer_token';
 
 export function getLocalCustomerResult(token: string): OpenResult | null {
   try {
@@ -39,8 +41,6 @@ export function saveLocalClaimedBox(token: string, serial: string): void {
   }
 }
 
-const CLIENT_ID_KEY = 'ssb_cust_device_id';
-
 export function getOrCreateCustomerClientId(): string {
   try {
     let id = localStorage.getItem(CLIENT_ID_KEY);
@@ -58,11 +58,16 @@ export function getOrCreateCustomerClientId(): string {
  * Fetch customer session with authoritative server enforcement
  */
 export async function fetchCustomerSession(token?: string | null): Promise<CustomerSession> {
-  // If no token is provided, this is the main website public view
-  if (!token || !token.trim()) {
+  const explicitToken = token && token.trim() ? token.trim() : null;
+  const savedToken = typeof localStorage !== 'undefined' ? localStorage.getItem(SESSION_TOKEN_KEY)?.trim() : null;
+  const cleanToken = explicitToken || savedToken || '';
+
+  // If no customer token is provided or stored, return standard public view
+  if (!cleanToken) {
     return {
       valid: true,
       token: '',
+      isMainPage: true,
       hasClaimed: false,
       assignedBox: null,
       batchId: 1,
@@ -72,7 +77,6 @@ export async function fetchCustomerSession(token?: string | null): Promise<Custo
     };
   }
 
-  const cleanToken = token.trim();
   const clientId = getOrCreateCustomerClientId();
 
   try {
@@ -82,6 +86,7 @@ export async function fetchCustomerSession(token?: string | null): Promise<Custo
     const res = await fetch(`/api/customer/session?token=${encodeURIComponent(cleanToken)}`, {
       headers: {
         'x-customer-client-id': clientId,
+        'x-customer-token': cleanToken,
       },
       signal: controller.signal,
     });
@@ -89,11 +94,14 @@ export async function fetchCustomerSession(token?: string | null): Promise<Custo
 
     if (res.ok) {
       const data: CustomerSession = await res.json();
+      if (data.token) {
+        localStorage.setItem(SESSION_TOKEN_KEY, data.token);
+      }
       if (data.assignedBox) {
-        saveLocalClaimedBox(cleanToken, data.assignedBox);
+        saveLocalClaimedBox(data.token || cleanToken, data.assignedBox);
       }
       if (data.opened && data.result) {
-        saveLocalCustomerResult(cleanToken, {
+        saveLocalCustomerResult(data.token || cleanToken, {
           success: true,
           alreadyOpened: true,
           alreadyUsed: true,
@@ -107,6 +115,21 @@ export async function fetchCustomerSession(token?: string | null): Promise<Custo
       return data;
     } else {
       const errData = await res.json().catch(() => ({}));
+      // If was just a stale background session on main page, clear and fallback cleanly
+      if (!explicitToken && (res.status === 403 || res.status === 404)) {
+        localStorage.removeItem(SESSION_TOKEN_KEY);
+        return {
+          valid: true,
+          token: '',
+          isMainPage: true,
+          hasClaimed: false,
+          assignedBox: null,
+          batchId: 1,
+          opened: false,
+          used: false,
+          alreadyUsed: false,
+        };
+      }
       throw new Error(errData.error || 'Invalid or unregistered private link.');
     }
   } catch (err: unknown) {

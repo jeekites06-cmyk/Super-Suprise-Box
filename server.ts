@@ -118,6 +118,9 @@ export interface CustomerLinkRecord {
   boundClientIp?: string | null;
   boundClientUa?: string | null;
   boundAt?: string | null;
+  customerId?: string;
+  customerName?: string;
+  purchaseNumber?: number;
 }
 
 interface StoreSchema {
@@ -495,6 +498,10 @@ async function initDatabase(): Promise<void> {
             customerLinksMap.clear();
             storeData.customerLinks = storeData.customerLinks || {};
             for (const row of linksDbRes.rows) {
+              const customerName = row.customer_name || (row.note ? row.note.replace(/^Box\s+[A-Z0-9]+\s*[-:]*\s*/i, '').replace(/\s*-\s*Purchase\s*#\d+/i, '').trim() : '') || 'Customer 1';
+              const customerId = row.customer_id || customerName.toLowerCase().replace(/[^a-z0-9_-]/g, '_');
+              const purchaseNumber = row.purchase_number ? Number(row.purchase_number) : 1;
+
               const linkRec: CustomerLinkRecord = {
                 id: row.id,
                 tokenHash: row.token_hash,
@@ -506,8 +513,11 @@ async function initDatabase(): Promise<void> {
                 usedAt: row.used_at ? new Date(row.used_at).toISOString() : null,
                 revokedAt: row.revoked_at ? new Date(row.revoked_at).toISOString() : null,
                 createdBy: row.created_by || 'admin',
-                note: row.note || '',
+                note: row.note || `${customerName} - Purchase #${purchaseNumber}`,
                 rawToken: row.raw_token,
+                customerId,
+                customerName,
+                purchaseNumber,
               };
               customerLinksMap.set(linkRec.tokenHash, linkRec);
               storeData.customerLinks[linkRec.tokenHash] = linkRec;
@@ -599,7 +609,22 @@ async function initDatabase(): Promise<void> {
 
   if (storeData.customerLinks) {
     customerLinksMap.clear();
-    for (const link of Object.values(storeData.customerLinks)) {
+    const sortedLinks = Object.values(storeData.customerLinks).sort(
+      (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+    );
+    const counts = new Map<string, number>();
+    for (const link of sortedLinks) {
+      if (!link.customerName) {
+        link.customerName = (link.note ? link.note.replace(/^Box\s+[A-Z0-9]+\s*[-:]*\s*/i, '').replace(/\s*-\s*Purchase\s*#\d+/i, '').trim() : '') || 'Customer 1';
+      }
+      if (!link.customerId) {
+        link.customerId = link.customerName.toLowerCase().replace(/[^a-z0-9_-]/g, '_');
+      }
+      const c = (counts.get(link.customerId) || 0) + 1;
+      counts.set(link.customerId, c);
+      if (!link.purchaseNumber) {
+        link.purchaseNumber = c;
+      }
       customerLinksMap.set(link.tokenHash, link);
     }
   }
@@ -1430,11 +1455,13 @@ app.get(['/api/prizes', '/api/prizes/public', '/api/batch/prizes'], (_req: Reque
 // =========================================================================
 
 // 1. Admin List Links (Paginated, Searchable, Filterable)
+// 1. Admin List Links (Paginated, Searchable, Filterable, Grouped by Customer)
 app.get('/api/admin/links', requireAdminAuth, (req: Request, res: Response): void => {
   const page = Math.max(1, parseInt((req.query.page as string) || '1', 10));
   const limit = Math.min(200, Math.max(10, parseInt((req.query.limit as string) || '50', 10)));
   const search = ((req.query.search as string) || '').trim().toUpperCase();
   const statusFilter = ((req.query.status as string) || 'all').toUpperCase();
+  const customerIdFilter = ((req.query.customerId as string) || '').trim().toLowerCase();
 
   const reqProto = req.headers['x-forwarded-proto'] || req.protocol || 'http';
   const reqHost = req.headers['x-forwarded-host'] || req.headers.host || 'localhost:3000';
@@ -1450,6 +1477,18 @@ app.get('/api/admin/links', requireAdminAuth, (req: Request, res: Response): voi
   let totalRevoked = 0;
 
   const allLinks: (CustomerLinkRecord & { url: string; isWinner?: boolean })[] = [];
+  const customersMap = new Map<string, {
+    customerId: string;
+    customerName: string;
+    totalPurchases: number;
+    unusedCount: number;
+    activatedCount: number;
+    claimedCount: number;
+    usedCount: number;
+    revokedCount: number;
+    latestCreatedAt: string;
+    links: (CustomerLinkRecord & { url: string; isWinner?: boolean })[];
+  }>();
 
   for (const l of customerLinksMap.values()) {
     if (l.status === 'UNUSED') totalUnused++;
@@ -1458,22 +1497,76 @@ app.get('/api/admin/links', requireAdminAuth, (req: Request, res: Response): voi
     else if (l.status === 'USED') totalUsed++;
     else if (l.status === 'REVOKED') totalRevoked++;
 
-    if (statusFilter !== 'ALL' && l.status !== statusFilter) {
+    const enrichedLink = {
+      ...l,
+      customerId: l.customerId || (l.customerName ? l.customerName.toLowerCase().replace(/[^a-z0-9_-]/g, '_') : 'customer_1'),
+      customerName: l.customerName || (l.note ? l.note.replace(/^Box\s+[A-Z0-9]+\s*[-:]*\s*/i, '').replace(/\s*-\s*Purchase\s*#\d+/i, '').trim() : '') || 'Customer 1',
+      purchaseNumber: l.purchaseNumber || 1,
+      url: `${baseUrl}/?token=${l.rawToken}`,
+      isWinner: l.boxSerial && l.boxSerial !== 'UNASSIGNED' ? WINNING_SERIALS_SET.has(l.boxSerial) : false,
+    };
+
+    // Grouping by customer
+    const cId = enrichedLink.customerId;
+    const cName = enrichedLink.customerName;
+    let custGroup = customersMap.get(cId);
+    if (!custGroup) {
+      custGroup = {
+        customerId: cId,
+        customerName: cName,
+        totalPurchases: 0,
+        unusedCount: 0,
+        activatedCount: 0,
+        claimedCount: 0,
+        usedCount: 0,
+        revokedCount: 0,
+        latestCreatedAt: enrichedLink.createdAt,
+        links: [],
+      };
+      customersMap.set(cId, custGroup);
+    }
+    custGroup.totalPurchases++;
+    if (enrichedLink.status === 'UNUSED') custGroup.unusedCount++;
+    else if (enrichedLink.status === 'ACTIVATED') custGroup.activatedCount++;
+    else if (enrichedLink.status === 'CLAIMED') custGroup.claimedCount++;
+    else if (enrichedLink.status === 'USED') custGroup.usedCount++;
+    else if (enrichedLink.status === 'REVOKED') custGroup.revokedCount++;
+    if (new Date(enrichedLink.createdAt).getTime() > new Date(custGroup.latestCreatedAt).getTime()) {
+      custGroup.latestCreatedAt = enrichedLink.createdAt;
+    }
+    custGroup.links.push(enrichedLink);
+
+    // Filters for flat link table
+    if (statusFilter !== 'ALL' && enrichedLink.status !== statusFilter) {
       continue;
     }
-    if (search && !l.boxSerial.includes(search) && !l.tokenPrefix.includes(search) && !(l.note && l.note.toUpperCase().includes(search))) {
+    if (customerIdFilter && enrichedLink.customerId !== customerIdFilter) {
+      continue;
+    }
+    if (
+      search &&
+      !enrichedLink.boxSerial.includes(search) &&
+      !enrichedLink.tokenPrefix.includes(search) &&
+      !(enrichedLink.note && enrichedLink.note.toUpperCase().includes(search)) &&
+      !(enrichedLink.customerName && enrichedLink.customerName.toUpperCase().includes(search)) &&
+      !(enrichedLink.customerId && enrichedLink.customerId.toUpperCase().includes(search))
+    ) {
       continue;
     }
 
-    allLinks.push({
-      ...l,
-      url: `${baseUrl}/?token=${l.rawToken}`,
-      isWinner: l.boxSerial && l.boxSerial !== 'UNASSIGNED' ? WINNING_SERIALS_SET.has(l.boxSerial) : false,
-    });
+    allLinks.push(enrichedLink);
   }
 
   // Sort newest first
   allLinks.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+
+  // Sort customer groups newest first, and internal customer links newest first
+  const customersList = Array.from(customersMap.values())
+    .map((cg) => ({
+      ...cg,
+      links: cg.links.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()),
+    }))
+    .sort((a, b) => new Date(b.latestCreatedAt).getTime() - new Date(a.latestCreatedAt).getTime());
 
   const totalFiltered = allLinks.length;
   const totalPages = Math.ceil(totalFiltered / limit) || 1;
@@ -1483,6 +1576,7 @@ app.get('/api/admin/links', requireAdminAuth, (req: Request, res: Response): voi
   res.json({
     success: true,
     links: pagedLinks,
+    customers: customersList,
     totalCount: totalFiltered,
     page,
     totalPages,
@@ -1494,15 +1588,16 @@ app.get('/api/admin/links', requireAdminAuth, (req: Request, res: Response): voi
       claimed: totalClaimed,
       used: totalUsed,
       revoked: totalRevoked,
+      totalCustomers: customersMap.size,
     },
   });
 });
 
-// 2. Admin Generate Customer-Specific Link (Displays all available boxes for customer to choose and claim)
+// 2. Admin Generate Customer-Specific Link (Supports Multi-Purchase: Separate unique link for each purchase)
 app.post('/api/admin/links/generate', requireAdminAuth, async (req: Request, res: Response): Promise<void> => {
-  const { boxSerial, note } = req.body || {};
+  const { boxSerial, note, customerName: rawCustomerName, customerId: rawCustomerId } = req.body || {};
   let cleanSerial = 'UNASSIGNED';
-  let boxId = 0;
+  let boxId = 1;
 
   if (typeof boxSerial === 'string' && boxSerial.trim() && boxSerial.trim().toUpperCase() !== 'UNASSIGNED') {
     cleanSerial = boxSerial.trim().toUpperCase();
@@ -1522,6 +1617,30 @@ app.post('/api/admin/links/generate', requireAdminAuth, async (req: Request, res
     boxId = box.id;
   }
 
+  // Multi-purchase customer association
+  let customerName = (typeof rawCustomerName === 'string' && rawCustomerName.trim())
+    ? rawCustomerName.trim()
+    : (typeof note === 'string' && note.trim())
+    ? note.trim()
+    : 'Customer 1';
+
+  let customerId = (typeof rawCustomerId === 'string' && rawCustomerId.trim())
+    ? rawCustomerId.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '_')
+    : customerName.toLowerCase().replace(/[^a-z0-9_-]/g, '_');
+
+  // Count existing purchases for this customer to determine this purchase number
+  let existingPurchases = 0;
+  for (const l of customerLinksMap.values()) {
+    const lCustId = l.customerId || (l.customerName ? l.customerName.toLowerCase().replace(/[^a-z0-9_-]/g, '_') : '');
+    if (lCustId === customerId) {
+      existingPurchases++;
+    }
+  }
+  const purchaseNumber = existingPurchases + 1;
+  const linkNote = typeof note === 'string' && note.trim()
+    ? note.trim()
+    : `${customerName} - Purchase #${purchaseNumber}`;
+
   const reqProto = req.headers['x-forwarded-proto'] || req.protocol || 'http';
   const reqHost = req.headers['x-forwarded-host'] || req.headers.host || 'localhost:3000';
   const currentOrigin = `${reqProto}://${reqHost}`;
@@ -1538,11 +1657,18 @@ app.post('/api/admin/links/generate', requireAdminAuth, async (req: Request, res
   let linkId = Date.now();
   if (neonPool) {
     try {
+      // Ensure customer association columns exist
+      await neonPool.query(`
+        ALTER TABLE public.customer_links ADD COLUMN IF NOT EXISTS customer_id VARCHAR(255);
+        ALTER TABLE public.customer_links ADD COLUMN IF NOT EXISTS customer_name VARCHAR(255);
+        ALTER TABLE public.customer_links ADD COLUMN IF NOT EXISTS purchase_number INT DEFAULT 1;
+      `).catch(() => {});
+
       const insRes = await neonPool.query(`
-        INSERT INTO public.customer_links (token_hash, token_prefix, box_id, box_serial, status, created_at, created_by, note, raw_token)
-        VALUES ($1, $2, $3, $4, 'UNUSED', NOW(), 'admin', $5, $6)
+        INSERT INTO public.customer_links (token_hash, token_prefix, box_id, box_serial, status, created_at, created_by, note, raw_token, customer_id, customer_name, purchase_number)
+        VALUES ($1, $2, $3, $4, 'UNUSED', NOW(), 'admin', $5, $6, $7, $8, $9)
         RETURNING id, created_at;
-      `, [tokenHash, tokenPrefix, boxId, cleanSerial, note || (cleanSerial === 'UNASSIGNED' ? 'Customer Link' : `Box ${cleanSerial}`), rawToken]);
+      `, [tokenHash, tokenPrefix, boxId, cleanSerial, linkNote, rawToken, customerId, customerName, purchaseNumber]);
       if (insRes.rows.length > 0) {
         linkId = insRes.rows[0].id;
       }
@@ -1562,8 +1688,11 @@ app.post('/api/admin/links/generate', requireAdminAuth, async (req: Request, res
     usedAt: null,
     revokedAt: null,
     createdBy: 'admin',
-    note: note || (cleanSerial === 'UNASSIGNED' ? 'Customer Link' : `Box ${cleanSerial}`),
+    note: linkNote,
     rawToken,
+    customerId,
+    customerName,
+    purchaseNumber,
   };
 
   customerLinksMap.set(tokenHash, linkRecord);
@@ -1576,6 +1705,10 @@ app.post('/api/admin/links/generate', requireAdminAuth, async (req: Request, res
     success: true,
     url: generatedUrl,
     rawToken,
+    token: rawToken,
+    customerId,
+    customerName,
+    purchaseNumber,
     link: {
       ...linkRecord,
       url: generatedUrl,
@@ -2027,8 +2160,8 @@ app.get('/api/customer/session', (req: Request, res: Response): void => {
 
         if (neonPool) {
           neonPool.query(
-            `UPDATE public.customer_links SET status = $1, used_at = $2 WHERE token_hash = $3`,
-            [link.status, now, link.tokenHash]
+            `UPDATE public.customer_links SET status = $1 WHERE token_hash = $2`,
+            [link.status, link.tokenHash]
           ).catch((e) => console.error('[DATABASE] Error updating link status in Neon:', e));
         }
 
@@ -2037,9 +2170,9 @@ app.get('/api/customer/session', (req: Request, res: Response): void => {
       }
     }
 
-    // Set cookie on response if response headers not sent yet to preserve session for returning customer
-    if (!res.headersSent && link.rawToken) {
-      const clientId = extractClientId(req, res);
+    // Ensure session cookie is set for returning customer if not already set above
+    if (!res.headersSent && link.rawToken && !res.getHeader('Set-Cookie')) {
+      const clientId = link.boundClientId || extractClientId(req, res);
       res.setHeader('Set-Cookie', [
         `ssb_cust_id=${encodeURIComponent(clientId)}; Path=/; Max-Age=315360000; SameSite=Lax`,
         `ssb_customer_session=${encodeURIComponent(link.rawToken)}; Path=/; Max-Age=315360000; SameSite=Lax`,
@@ -2169,17 +2302,24 @@ app.get('/api/customer/session', (req: Request, res: Response): void => {
 // - Once a box is claimed, remove it from the available-box grid for every customer.
 // - If two customers claim simultaneously, synchronize box availability and prevent duplicate claims.
 app.post('/api/boxes/claim', async (req: Request, res: Response): Promise<void> => {
-  const { token, boxSerial } = req.body;
+  const rawSerial = req.body.boxSerial || req.body.serialNumber || req.body.serial;
 
-  if (!boxSerial || typeof boxSerial !== 'string') {
+  if (!rawSerial || typeof rawSerial !== 'string') {
     res.status(400).json({ error: 'Box serial number is required.' });
     return;
   }
 
-  const cleanSerial = boxSerial.trim().toUpperCase();
+  let cleanSerial = rawSerial.trim().toUpperCase();
+  if (!boxesMap.has(cleanSerial)) {
+    const num = parseInt(cleanSerial.replace(/\D/g, ''), 10);
+    if (!isNaN(num) && num >= START_SERIAL_NUM && num <= END_SERIAL_NUM) {
+      cleanSerial = formatSerial(num);
+    }
+  }
+
   // If customer claimed from main website without a token, generate their unique private token
-  const cleanToken = (typeof token === 'string' && token.trim())
-    ? token.trim()
+  const cleanToken = (typeof req.body.token === 'string' && req.body.token.trim())
+    ? req.body.token.trim()
     : `SS1-CUST-${Date.now().toString(36).toUpperCase()}-${Math.random().toString(36).substring(2, 6).toUpperCase()}`;
 
   // Acquire atomic transaction lock
@@ -2239,13 +2379,42 @@ app.post('/api/boxes/claim', async (req: Request, res: Response): Promise<void> 
       }
     }
 
-    // Check if link is already used/opened
+    // ENFORCE EXACTLY ONE SUCCESSFUL BOX CLAIM PER LINK:
+    if (link) {
+      if (link.status === 'USED') {
+        res.status(403).json({
+          error: 'THIS LINK HAS ALREADY BEEN USED. BETTER LUCK NEXT TIME.',
+          alreadyUsed: true,
+        });
+        return;
+      }
+      if (link.status === 'CLAIMED' || (link.boxSerial && link.boxSerial !== 'UNASSIGNED')) {
+        if (cleanSerial === link.boxSerial) {
+          res.json({
+            success: true,
+            boxSerial: link.boxSerial,
+            message: 'Box already assigned to your link.',
+          });
+          return;
+        }
+        res.status(403).json({
+          error: `This purchase link has already claimed Box ${link.boxSerial}. Exactly one box claim is allowed per link.`,
+          alreadyClaimed: true,
+        });
+        return;
+      }
+    }
+
+    // Check if session is already used/opened
     if (customer.opened || customer.used) {
-      res.status(403).json({ error: 'THIS LINK HAS ALREADY BEEN USED.' });
+      res.status(403).json({
+        error: 'THIS LINK HAS ALREADY BEEN USED. BETTER LUCK NEXT TIME.',
+        alreadyUsed: true,
+      });
       return;
     }
 
-    // If customer already claimed a box, prevent switching
+    // If customer already claimed a box, prevent duplicate claims (exactly one claim allowed)
     if (customer.hasClaimed && customer.assignedBox) {
       if (customer.assignedBox === cleanSerial) {
         res.json({
@@ -2256,7 +2425,8 @@ app.post('/api/boxes/claim', async (req: Request, res: Response): Promise<void> 
         return;
       }
       res.status(403).json({
-        error: `You have already claimed Box ${customer.assignedBox}. You cannot switch to another box.`,
+        error: `This purchase link has already claimed Box ${customer.assignedBox}. Exactly one box claim is allowed per link.`,
+        alreadyClaimed: true,
       });
       return;
     }
@@ -2428,7 +2598,7 @@ app.post('/api/customer/open', async (req: Request, res: Response): Promise<void
       if (link.status === 'USED') {
         const box = boxesMap.get(link.boxSerial);
         res.status(403).json({
-          error: 'THIS LINK HAS ALREADY BEEN USED.',
+          error: 'THIS LINK HAS ALREADY BEEN USED. BETTER LUCK NEXT TIME.',
           alreadyOpened: true,
           alreadyUsed: true,
           boxSerial: link.boxSerial,
@@ -2440,6 +2610,11 @@ app.post('/api/customer/open', async (req: Request, res: Response): Promise<void
       }
 
       const assignedBoxSerial = link.boxSerial;
+
+      if (!assignedBoxSerial || assignedBoxSerial === 'UNASSIGNED') {
+        res.status(400).json({ error: 'You must select and claim an available box before opening.' });
+        return;
+      }
 
       // Prevent box tampering
       if (boxSerial && boxSerial.trim().toUpperCase() !== assignedBoxSerial) {
@@ -2480,11 +2655,11 @@ app.post('/api/customer/open', async (req: Request, res: Response): Promise<void
         try {
           await client.query('BEGIN');
 
-          // Strict conditional update: must be UNUSED at the moment of update
+          // Strict conditional update: must not be USED at the moment of update
           const updateLinkRes = await client.query(
             `UPDATE public.customer_links
              SET status = 'USED', used_at = $1
-             WHERE token_hash = $2 AND status = 'UNUSED'
+             WHERE token_hash = $2 AND status != 'USED'
              RETURNING *;`,
             [now, tokenHash]
           );
@@ -2493,7 +2668,7 @@ app.post('/api/customer/open', async (req: Request, res: Response): Promise<void
             // Simultaneous concurrent request already used this link
             await client.query('ROLLBACK');
             res.status(403).json({
-              error: 'THIS LINK HAS ALREADY BEEN USED.',
+              error: 'THIS LINK HAS ALREADY BEEN USED. BETTER LUCK NEXT TIME.',
               alreadyUsed: true,
               alreadyOpened: true,
             });
@@ -2605,7 +2780,7 @@ app.post('/api/customer/open', async (req: Request, res: Response): Promise<void
     // ENFORCE ONE-TIME USE: If already opened/used, return error
     if (customer.opened || customer.used) {
       res.status(403).json({
-        error: 'THIS LINK HAS ALREADY BEEN USED.',
+        error: 'THIS LINK HAS ALREADY BEEN USED. BETTER LUCK NEXT TIME.',
         alreadyOpened: true,
         alreadyUsed: true,
         boxSerial: customer.assignedBox,

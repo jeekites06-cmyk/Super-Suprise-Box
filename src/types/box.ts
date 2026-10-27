@@ -142,11 +142,28 @@ export interface AdminCustomerLink {
   url: string;
   isWinner?: boolean;
   boundClientId?: string | null;
+  customerId?: string;
+  customerName?: string;
+  purchaseNumber?: number;
+}
+
+export interface CustomerGroupSummary {
+  customerId: string;
+  customerName: string;
+  totalPurchases: number;
+  unusedCount: number;
+  activatedCount: number;
+  claimedCount: number;
+  usedCount: number;
+  revokedCount: number;
+  latestCreatedAt: string;
+  links: AdminCustomerLink[];
 }
 
 export interface AdminLinksResponse {
   success: boolean;
   links: AdminCustomerLink[];
+  customers?: CustomerGroupSummary[];
   totalCount: number;
   page: number;
   totalPages: number;
@@ -154,8 +171,11 @@ export interface AdminLinksResponse {
   stats: {
     total: number;
     unused: number;
+    activated?: number;
+    claimed?: number;
     used: number;
     revoked: number;
+    totalCustomers?: number;
   };
 }
 

@@ -93,12 +93,11 @@ export default function App() {
   const loadTokenSession = async (token?: string | null) => {
     setSessionLoading(true);
 
-    const cleanToken = token?.trim() || null;
+    const explicitToken = token?.trim() || null;
+    const storedToken = typeof localStorage !== 'undefined' ? localStorage.getItem('ssb_customer_token')?.trim() : null;
+    const cleanToken = explicitToken || storedToken || null;
 
-    // STRICT REQUIREMENT:
-    // When a customer opens the main website URL without a private customer token,
-    // display the MAIN BOX SELECTION PAGE instead of the "THIS LINK HAS ALREADY BEEN USED" screen.
-    // Do not treat the main website URL as an expired private link.
+    // When customer has no active token or stored session, show the main available box selection page
     if (!cleanToken) {
       setIsReopenedUsedLink(false);
       setIsRevokedLink(false);
@@ -179,7 +178,10 @@ export default function App() {
   const handleBoxClaimed = (serial: string, newToken?: string) => {
     const assignedToken = newToken || customerSession?.token || `SS1-CUST-${Date.now().toString(36).toUpperCase()}`;
 
-    // Establish customer private token in the browser address bar
+    // Persist customer private token in localStorage and browser address bar
+    if (typeof localStorage !== 'undefined' && assignedToken) {
+      localStorage.setItem('ssb_customer_token', assignedToken);
+    }
     if (assignedToken && !window.location.search.includes(assignedToken)) {
       const url = new URL(window.location.href);
       url.searchParams.set('token', assignedToken);

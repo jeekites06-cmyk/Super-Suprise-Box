@@ -29,8 +29,11 @@ import {
   Globe,
   AlertTriangle,
   CheckCheck,
+  Users,
+  User,
+  Plus,
 } from 'lucide-react';
-import { AdminBoxRecord, AdminStats, AdminPrizeRecord } from '../types/box';
+import { AdminBoxRecord, AdminStats, AdminPrizeRecord, AdminCustomerLink, CustomerGroupSummary } from '../types/box';
 
 interface AdminDashboardProps {
   onBackToCustomerView: () => void;
@@ -52,6 +55,18 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBackToCustomer
 
   // Dashboard tab state: 'boxes' | 'prizes' | 'links'
   const [activeTab, setActiveTab] = useState<'boxes' | 'prizes' | 'links'>('prizes');
+
+  // Customer Links state
+  const [customerLinks, setCustomerLinks] = useState<AdminCustomerLink[]>([]);
+  const [customerGroups, setCustomerGroups] = useState<CustomerGroupSummary[]>([]);
+  const [customerLinksLoading, setCustomerLinksLoading] = useState<boolean>(false);
+  const [customerNameInput, setCustomerNameInput] = useState<string>('');
+  const [customerNoteInput, setCustomerNoteInput] = useState<string>('');
+  const [selectedCustomerId, setSelectedCustomerId] = useState<string>('');
+  const [linkViewMode, setLinkViewMode] = useState<'grouped' | 'all'>('grouped');
+  const [filterCustomerId, setFilterCustomerId] = useState<string>('');
+  const [generatingCustomerLink, setGeneratingCustomerLink] = useState<boolean>(false);
+  const [latestCustomerLink, setLatestCustomerLink] = useState<AdminCustomerLink | null>(null);
 
   // Common Customer Link state
   const [copiedCommonLink, setCopiedCommonLink] = useState<boolean>(false);
@@ -279,36 +294,149 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBackToCustomer
     return '';
   };
 
-  const handleCopyCustomerLink = () => {
-    const commonUrl = getCommonCustomerUrl();
-    if (!commonUrl) {
-      showNotification('error', 'Unable to resolve public customer website URL.');
-      return;
+  const fetchCustomerLinks = useCallback(async () => {
+    if (!token) return;
+    setCustomerLinksLoading(true);
+    try {
+      const res = await fetch('/api/admin/links?limit=100', {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setCustomerLinks(data.links || []);
+        if (data.customers) {
+          setCustomerGroups(data.customers);
+        }
+        if (data.links && data.links.length > 0 && !latestCustomerLink) {
+          setLatestCustomerLink(data.links[0]);
+        }
+      }
+    } catch (err) {
+      console.error('Failed to fetch customer links:', err);
+    } finally {
+      setCustomerLinksLoading(false);
+    }
+  }, [token, latestCustomerLink]);
+
+  const handleGenerateCustomerLink = async (
+    autoCopy = false,
+    overrideCustomerName?: string,
+    overrideCustomerId?: string
+  ) => {
+    if (!token) return null;
+    setGeneratingCustomerLink(true);
+    try {
+      const chosenCustomer = overrideCustomerName
+        ? overrideCustomerName.trim()
+        : customerNameInput.trim() || (selectedCustomerId ? customerGroups.find((g) => g.customerId === selectedCustomerId)?.customerName || '' : '') || 'Customer 1';
+
+      const chosenCustomerId = overrideCustomerId
+        ? overrideCustomerId
+        : selectedCustomerId || undefined;
+
+      const res = await fetch('/api/admin/links/generate', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          customerName: chosenCustomer,
+          customerId: chosenCustomerId,
+          note: customerNoteInput.trim() || undefined,
+        }),
+      });
+      const data = await res.json();
+      if (res.ok && data.success && data.link) {
+        setLatestCustomerLink(data.link);
+        setCustomerNoteInput('');
+        fetchCustomerLinks();
+        const successMsg = `Generated purchase link #${data.purchaseNumber || 1} for ${data.customerName || chosenCustomer}: ${data.url}`;
+        if (autoCopy && navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(data.url).then(() => {
+            setCopiedCommonLink(true);
+            showNotification('success', `Copied link: ${data.url}`);
+            setTimeout(() => setCopiedCommonLink(false), 2500);
+          }).catch(() => {
+            showNotification('success', successMsg);
+          });
+        } else {
+          showNotification('success', successMsg);
+        }
+        return data.link;
+      } else {
+        showNotification('error', data.error || 'Failed to generate customer link.');
+      }
+    } catch (err) {
+      console.error('Error generating customer link:', err);
+      showNotification('error', 'Network error generating customer link.');
+    } finally {
+      setGeneratingCustomerLink(false);
+    }
+    return null;
+  };
+
+  const handleCopyCustomerLink = async () => {
+    let targetUrl = latestCustomerLink?.url;
+    if (!targetUrl) {
+      const newLink = await handleGenerateCustomerLink(true);
+      if (newLink?.url) targetUrl = newLink.url;
+    }
+
+    if (!targetUrl) {
+      targetUrl = getCommonCustomerUrl();
     }
 
     if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(commonUrl).then(() => {
+      navigator.clipboard.writeText(targetUrl).then(() => {
         setCopiedCommonLink(true);
-        showNotification('success', `Copied public customer link to clipboard: ${commonUrl}`);
+        showNotification('success', `Copied customer link to clipboard: ${targetUrl}`);
         setTimeout(() => setCopiedCommonLink(false), 2500);
       }).catch(() => {
-        showNotification('success', `Public customer link: ${commonUrl}`);
+        showNotification('success', `Customer link: ${targetUrl}`);
       });
     } else {
-      showNotification('success', `Public customer link: ${commonUrl}`);
+      showNotification('success', `Customer link: ${targetUrl}`);
     }
   };
 
-  const handleShareWhatsAppCommon = () => {
-    const commonUrl = getCommonCustomerUrl();
-    if (!commonUrl) {
-      showNotification('error', 'Unable to resolve public customer website URL.');
-      return;
+  const handleShareWhatsAppCommon = async () => {
+    let targetUrl = latestCustomerLink?.url;
+    if (!targetUrl) {
+      const newLink = await handleGenerateCustomerLink(false);
+      if (newLink?.url) targetUrl = newLink.url;
     }
 
-    const text = `🎉 *SUPER SURPRISE BOX (BATCH 1)*\n\nChoose your surprise box from 15,051 available boxes! 100 winning prizes including 4 Apple iPhones and 96 Cash Rewards.\n\nOpen link to select your box:\n${commonUrl}`;
+    if (!targetUrl) {
+      targetUrl = getCommonCustomerUrl();
+    }
+
+    const text = `🎉 *SUPER SURPRISE BOX (BATCH 1)*\n\nChoose your surprise box from 15,051 available boxes! 100 winning prizes including 4 Apple iPhones and 96 Cash Rewards.\n\nOpen your private customer link to select and claim your box:\n${targetUrl}`;
     const waUrl = `https://api.whatsapp.com/send?text=${encodeURIComponent(text)}`;
     window.open(waUrl, '_blank', 'noopener,noreferrer');
+  };
+
+  const handleRevokeCustomerLink = async (tokenHash: string) => {
+    if (!token) return;
+    try {
+      const res = await fetch('/api/admin/links/revoke', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ tokenHash }),
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        showNotification('success', 'Customer link has been revoked.');
+        fetchCustomerLinks();
+      } else {
+        showNotification('error', data.error || 'Failed to revoke link.');
+      }
+    } catch {
+      showNotification('error', 'Network error revoking link.');
+    }
   };
 
   const handleSavePublicUrl = async (e?: React.FormEvent) => {
@@ -401,11 +529,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBackToCustomer
       fetchStats();
       fetchCustomerUrl();
       fetchPrizes();
+      fetchCustomerLinks();
       if (activeTab === 'boxes') {
         fetchBoxes(boxesPage, boxesLimit, boxesSearch, boxesFilter);
       }
     }
-  }, [isAuthenticated, activeTab, fetchStats, fetchBoxes, fetchPrizes, fetchCustomerUrl, boxesPage, boxesLimit, boxesSearch, boxesFilter]);
+  }, [isAuthenticated, activeTab, fetchStats, fetchBoxes, fetchPrizes, fetchCustomerUrl, fetchCustomerLinks, boxesPage, boxesLimit, boxesSearch, boxesFilter]);
 
   // Handle Login
   const handleLoginSubmit = async (e: React.FormEvent) => {
@@ -1658,12 +1787,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBackToCustomer
         )}
 
         {/* =====================================================================
-            TAB 3: COMMON CUSTOMER LINK (ALL 15,051 BOXES)
+            TAB 3: CUSTOMER-SPECIFIC LINK MANAGEMENT (ALL 15,051 BOXES)
            ===================================================================== */}
         {activeTab === 'links' && (
           <div className="space-y-4">
             <div className="bg-[#0c0c12] border border-amber-500/30 rounded-2xl p-5 sm:p-7 shadow-xl relative overflow-hidden">
-              {/* Decorative ambient gold glow */}
               <div className="absolute top-0 right-0 w-80 h-80 bg-amber-500/5 rounded-full blur-3xl pointer-events-none" />
 
               {/* Header */}
@@ -1671,70 +1799,548 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBackToCustomer
                 <div>
                   <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-amber-500/10 border border-amber-400/30 text-[10px] text-amber-300 font-cinzel font-bold uppercase tracking-wider mb-2">
                     <LinkIcon className="w-3.5 h-3.5 text-amber-400" />
-                    <span>Official Common Customer Portal</span>
+                    <span>Customer Link Management</span>
                   </div>
                   <h2 className="text-lg sm:text-xl font-black font-cinzel text-white uppercase tracking-wide">
-                    Common Customer Link
+                    Customer-Specific Link Generator
                   </h2>
                   <p className="text-xs text-neutral-400 mt-1 max-w-2xl leading-relaxed">
-                    One common public link for all 15,051 boxes. Share this URL with unlimited customers to allow them to browse, search, and select any currently available surprise box. Each box is claimed on-demand with atomic server-side locking, and this link remains permanently reusable.
+                    Generate one customer-specific link from the Admin Portal (not separate links for all 15,051 boxes). When the customer opens the link, all currently available boxes are displayed for them to choose and claim. The link is locked to the intended customer's device; forwarded users are denied access. Once activated, the link expires for other users while the original customer can return anytime via their secure session.
                   </p>
                 </div>
 
                 <div className="flex items-center gap-2">
-                  <div className="px-3.5 py-2 rounded-xl bg-neutral-900/90 border border-emerald-500/40 text-emerald-300 flex items-center gap-2 text-xs font-mono-numbers">
-                    <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-                    <span>Unlimited Reusable Link</span>
+                  <div className="px-3.5 py-2 rounded-xl bg-neutral-900/90 border border-amber-500/40 text-amber-300 flex items-center gap-2 text-xs font-mono-numbers">
+                    <Lock className="w-4 h-4 text-amber-400 shrink-0" />
+                    <span>Device Locked & Protected</span>
                   </div>
                 </div>
               </div>
 
-              {/* Mobile 403 Error Prevention & Deployment Guidance Banner */}
-              {customerUrlConfig?.isDevOrigin && !customerUrlConfig?.isConfigured ? (
-                <div className="mb-6 p-4 rounded-xl bg-amber-950/40 border border-amber-500/50 text-amber-200">
-                  <div className="flex items-start gap-3">
-                    <AlertTriangle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
-                    <div className="space-y-2 flex-1 text-xs">
-                      <div className="font-cinzel font-bold text-amber-300 text-sm">
-                        Action Required: Internal AI Studio Dev URL Detected
-                      </div>
-                      <p className="text-neutral-300 leading-relaxed">
-                        You are currently viewing the Admin Portal from Google AI Studio's internal dev container (<code className="px-1.5 py-0.5 rounded bg-black/60 font-mono text-amber-300 text-[11px]">ais-dev-...</code>). This development URL requires your Google developer login and causes Google's <strong className="text-white">“403 — You do not have access to this page”</strong> error when opened on iPhone Safari, Android browsers, or WhatsApp.
-                      </p>
-                      <div className="p-3 rounded-lg bg-black/50 border border-amber-500/30 space-y-1.5 text-[11px]">
-                        <div className="font-bold text-amber-400 uppercase tracking-wide">
-                          Steps to Deploy & Enable Mobile Sharing:
-                        </div>
-                        <ol className="list-decimal list-inside space-y-1 text-neutral-300">
-                          <li>
-                            <strong className="text-white">Deploy / Publish:</strong> Click the <strong className="text-amber-300">“Share”</strong> or <strong className="text-amber-300">“Publish”</strong> button in the Google AI Studio editor top bar to deploy your public preview link (<code className="font-mono text-neutral-300">{customerUrlConfig.suggestedSharedUrl}</code>), or deploy to your custom domain.
-                          </li>
-                          <li>
-                            <strong className="text-white">Configure Public URL:</strong> Click <strong className="text-amber-300">“Configure Public URL”</strong> below, enter your deployed public URL, and click <strong className="text-amber-300">“Save Public URL”</strong>.
-                          </li>
-                          <li>
-                            <strong className="text-white">Share Freely:</strong> The Copy and WhatsApp buttons will immediately share your clean, public website URL with zero login required.
-                          </li>
-                        </ol>
-                      </div>
+              {/* 1. Generate Customer Link Form Card */}
+              <div className="mb-6 p-4 sm:p-5 rounded-2xl bg-neutral-950 border border-amber-500/30 space-y-4">
+                <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
+                  <div>
+                    <h3 className="text-xs font-bold font-cinzel text-amber-300 uppercase tracking-wider flex items-center gap-2">
+                      <Users className="w-3.5 h-3.5" />
+                      <span>Customer Link & Multi-Purchase Generator</span>
+                    </h3>
+                    <p className="text-[11px] text-neutral-400 mt-0.5">
+                      Generate a separate unique link for each purchase. All purchase links are associated with the same customer.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 items-end">
+                  {/* Customer Name or Select existing */}
+                  <div className="lg:col-span-5 space-y-1">
+                    <div className="flex items-center justify-between text-[10px] font-bold uppercase font-cinzel text-neutral-400">
+                      <span>Customer Name / Identifier:</span>
+                      {customerGroups.length > 0 && (
+                        <span className="text-amber-400/90 lowercase text-[9.5px]">
+                          ({customerGroups.length} existing customers)
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex gap-1.5">
+                      <input
+                        type="text"
+                        value={customerNameInput}
+                        onChange={(e) => {
+                          setCustomerNameInput(e.target.value);
+                          setSelectedCustomerId('');
+                        }}
+                        placeholder="Enter Customer Name (e.g. John Doe, +91 98...)"
+                        className="flex-1 px-3 py-2 bg-neutral-900 border border-neutral-700 focus:border-amber-400 rounded-xl text-xs text-white placeholder-neutral-500 focus:outline-none"
+                      />
+                      {customerGroups.length > 0 && (
+                        <select
+                          value={selectedCustomerId}
+                          onChange={(e) => {
+                            const id = e.target.value;
+                            setSelectedCustomerId(id);
+                            if (id) {
+                              const found = customerGroups.find((g) => g.customerId === id);
+                              if (found) setCustomerNameInput(found.customerName);
+                            }
+                          }}
+                          className="px-2 py-2 bg-neutral-900 border border-neutral-700 text-xs text-amber-300 rounded-xl focus:outline-none max-w-[130px] sm:max-w-[160px] truncate"
+                          title="Select existing customer"
+                        >
+                          <option value="">Select Existing ▾</option>
+                          {customerGroups.map((g) => (
+                            <option key={g.customerId} value={g.customerId}>
+                              {g.customerName} ({g.totalPurchases} {g.totalPurchases === 1 ? 'purchase' : 'purchases'})
+                            </option>
+                          ))}
+                        </select>
+                      )}
                     </div>
                   </div>
+
+                  {/* Purchase Note */}
+                  <div className="lg:col-span-4 space-y-1">
+                    <label className="text-[10px] font-bold uppercase font-cinzel text-neutral-400 block">
+                      Purchase Note / Order Ref (Optional):
+                    </label>
+                    <input
+                      type="text"
+                      value={customerNoteInput}
+                      onChange={(e) => setCustomerNoteInput(e.target.value)}
+                      placeholder="e.g. Order #1024, WhatsApp purchase..."
+                      className="w-full px-3 py-2 bg-neutral-900 border border-neutral-700 focus:border-amber-400 rounded-xl text-xs text-white placeholder-neutral-500 focus:outline-none"
+                    />
+                  </div>
+
+                  {/* Generate Button */}
+                  <div className="lg:col-span-3">
+                    <button
+                      type="button"
+                      onClick={() => handleGenerateCustomerLink(true)}
+                      disabled={generatingCustomerLink}
+                      className="w-full py-2.5 px-4 rounded-xl bg-gradient-to-r from-amber-400 to-yellow-400 hover:from-amber-300 hover:to-yellow-300 text-black font-cinzel font-bold text-xs uppercase tracking-wider flex items-center justify-center gap-2 transition-all shadow-md active:scale-95 cursor-pointer disabled:opacity-50 whitespace-nowrap"
+                    >
+                      {generatingCustomerLink ? (
+                        <div className="w-4 h-4 border-2 border-black border-t-transparent rounded-full animate-spin" />
+                      ) : (
+                        <Sparkles className="w-4 h-4 text-black" />
+                      )}
+                      <span>GENERATE & COPY LINK</span>
+                    </button>
+                  </div>
                 </div>
-              ) : customerUrlConfig?.isConfigured ? (
-                <div className="mb-6 p-3.5 rounded-xl bg-emerald-950/40 border border-emerald-500/40 text-emerald-200 flex items-center justify-between gap-3 text-xs">
-                  <div className="flex items-center gap-2.5">
-                    <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+
+                {/* Notice for customer association */}
+                {customerNameInput.trim() && (
+                  <div className="text-[11px] text-amber-300/90 bg-amber-950/30 border border-amber-500/20 px-3 py-1.5 rounded-lg flex items-center gap-2">
+                    <User className="w-3.5 h-3.5 text-amber-400 shrink-0" />
                     <span>
-                      <strong className="font-semibold text-emerald-300">Public Customer Website URL Active:</strong> Mobile WhatsApp recipients can open this link directly with no Google login.
+                      Associating with: <strong className="text-white">{customerNameInput.trim()}</strong>
+                      {(() => {
+                        const existing = customerGroups.find(
+                          (g) => g.customerName.toLowerCase() === customerNameInput.trim().toLowerCase()
+                        );
+                        if (existing) {
+                          return ` · Existing Customer (${existing.totalPurchases} previous purchases). This will create Purchase #${existing.totalPurchases + 1}.`;
+                        }
+                        return ' · New Customer (Purchase #1).';
+                      })()}
                     </span>
                   </div>
-                  <span className="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 text-[10px] font-mono font-bold uppercase shrink-0">
-                    Mobile Ready
-                  </span>
-                </div>
-              ) : null}
+                )}
 
-              {/* Common Link Display Box & Configuration Mode */}
+                {/* Display Latest Generated Link if Available */}
+                {latestCustomerLink && (
+                  <div className="p-4 rounded-xl bg-amber-950/20 border border-amber-500/50 space-y-3 animate-fade-in">
+                    <div className="flex items-center justify-between flex-wrap gap-2">
+                      <div className="flex items-center gap-2">
+                        <span className="text-[10px] font-bold uppercase font-cinzel text-amber-400 tracking-wider">
+                          Active Purchase Link Ready to Share:
+                        </span>
+                        <span className="px-2 py-0.5 rounded bg-amber-400/20 text-amber-300 text-[10px] font-bold">
+                          {latestCustomerLink.customerName || 'Customer'} (Purchase #{latestCustomerLink.purchaseNumber || 1})
+                        </span>
+                      </div>
+                      <span className="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 text-[10px] font-mono font-bold uppercase">
+                        {latestCustomerLink.status}
+                      </span>
+                    </div>
+
+                    <div className="flex items-center gap-2 bg-neutral-950 border border-neutral-800 rounded-xl p-2.5 sm:p-3">
+                      <LinkIcon className="w-4 h-4 text-amber-400 shrink-0 ml-1" />
+                      <span className="text-xs sm:text-sm text-amber-300 font-mono font-medium truncate flex-1 select-all">
+                        {latestCustomerLink.url}
+                      </span>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-1">
+                      <button
+                        type="button"
+                        onClick={handleCopyCustomerLink}
+                        className="py-2.5 px-4 rounded-xl bg-amber-400 hover:bg-amber-300 text-black font-cinzel font-bold text-xs uppercase tracking-wider flex items-center justify-center gap-2 transition-all shadow-md active:scale-95 cursor-pointer"
+                      >
+                        {copiedCommonLink ? (
+                          <>
+                            <Check className="w-4 h-4 text-black stroke-[3]" />
+                            <span>COPIED TO CLIPBOARD!</span>
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="w-4 h-4 text-black stroke-[2.5]" />
+                            <span>COPY PURCHASE LINK</span>
+                          </>
+                        )}
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={handleShareWhatsAppCommon}
+                        className="py-2.5 px-4 rounded-xl bg-[#25D366] hover:bg-[#20ba5a] text-white font-cinzel font-bold text-xs uppercase tracking-wider flex items-center justify-center gap-2 transition-all shadow-md active:scale-95 cursor-pointer"
+                      >
+                        <MessageCircle className="w-4 h-4 text-white stroke-[2.5]" />
+                        <span>SHARE VIA WHATSAPP</span>
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* 2. Customer Association & Purchase Links Section */}
+              <div className="mb-6 space-y-3">
+                <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
+                  {/* View Mode Toggle: Grouped by Customer vs All Links */}
+                  <div className="flex items-center gap-1.5 p-1 bg-neutral-950 border border-neutral-800 rounded-xl">
+                    <button
+                      type="button"
+                      onClick={() => setLinkViewMode('grouped')}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-cinzel font-bold tracking-wider transition-colors flex items-center gap-1.5 cursor-pointer ${
+                        linkViewMode === 'grouped'
+                          ? 'bg-amber-400 text-black shadow-sm'
+                          : 'text-neutral-400 hover:text-white'
+                      }`}
+                    >
+                      <Users className="w-3.5 h-3.5" />
+                      <span>Associated Customers ({customerGroups.length})</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setLinkViewMode('all')}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-cinzel font-bold tracking-wider transition-colors flex items-center gap-1.5 cursor-pointer ${
+                        linkViewMode === 'all'
+                          ? 'bg-amber-400 text-black shadow-sm'
+                          : 'text-neutral-400 hover:text-white'
+                      }`}
+                    >
+                      <LinkIcon className="w-3.5 h-3.5" />
+                      <span>All Purchase Links ({customerLinks.length})</span>
+                    </button>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    {linkViewMode === 'all' && customerGroups.length > 0 && (
+                      <select
+                        value={filterCustomerId}
+                        onChange={(e) => setFilterCustomerId(e.target.value)}
+                        className="px-2.5 py-1.5 bg-neutral-900 border border-neutral-700 text-xs text-neutral-300 rounded-xl focus:outline-none"
+                      >
+                        <option value="">All Customers ({customerGroups.length})</option>
+                        {customerGroups.map((g) => (
+                          <option key={g.customerId} value={g.customerId}>
+                            {g.customerName} ({g.totalPurchases})
+                          </option>
+                        ))}
+                      </select>
+                    )}
+                    <button
+                      type="button"
+                      onClick={fetchCustomerLinks}
+                      className="p-1.5 rounded-lg bg-neutral-900 border border-neutral-800 text-neutral-400 hover:text-amber-300 transition-colors cursor-pointer"
+                      title="Refresh customer links"
+                    >
+                      <RefreshCw className={`w-3.5 h-3.5 ${customerLinksLoading ? 'animate-spin' : ''}`} />
+                    </button>
+                  </div>
+                </div>
+
+                {/* VIEW 1: GROUPED BY CUSTOMER (Shows all purchase links associated with the same customer) */}
+                {linkViewMode === 'grouped' ? (
+                  <div className="space-y-4">
+                    {customerLinksLoading && customerGroups.length === 0 ? (
+                      <div className="py-12 text-center text-neutral-500 bg-[#0b0b10] border border-neutral-800 rounded-xl">
+                        <div className="w-5 h-5 border-2 border-amber-400 border-t-transparent rounded-full animate-spin mx-auto mb-2" />
+                        <span>Loading customer purchase records...</span>
+                      </div>
+                    ) : customerGroups.length === 0 ? (
+                      <div className="py-12 text-center text-neutral-500 bg-[#0b0b10] border border-neutral-800 rounded-xl">
+                        No customer links generated yet. Enter a customer name above to generate their first purchase link.
+                      </div>
+                    ) : (
+                      customerGroups.map((cg) => (
+                        <div
+                          key={cg.customerId}
+                          className="bg-[#0b0b10] border border-neutral-800 hover:border-neutral-700 rounded-2xl overflow-hidden shadow-lg transition-all"
+                        >
+                          {/* Customer Header */}
+                          <div className="p-3.5 sm:p-4 bg-[#111118] border-b border-neutral-800 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                            <div className="flex items-center gap-3">
+                              <div className="w-8 h-8 rounded-xl bg-amber-400/10 border border-amber-400/30 flex items-center justify-center text-amber-300 font-bold font-cinzel text-xs shrink-0">
+                                <Users className="w-4 h-4 text-amber-400" />
+                              </div>
+                              <div>
+                                <div className="flex items-center gap-2 flex-wrap">
+                                  <h4 className="text-sm font-bold font-cinzel text-white">
+                                    {cg.customerName}
+                                  </h4>
+                                  <span className="px-2 py-0.5 rounded-full bg-amber-400/15 border border-amber-400/30 text-amber-300 text-[10px] font-bold font-mono-numbers">
+                                    {cg.totalPurchases} {cg.totalPurchases === 1 ? 'PURCHASE' : 'PURCHASES'}
+                                  </span>
+                                </div>
+                                <div className="flex items-center gap-2 text-[11px] text-neutral-400 mt-0.5 flex-wrap">
+                                  <span className="text-emerald-400">{cg.unusedCount + cg.activatedCount} Ready</span>
+                                  <span>·</span>
+                                  <span className="text-purple-300">{cg.claimedCount} Claimed</span>
+                                  <span>·</span>
+                                  <span className="text-neutral-400">{cg.usedCount} Opened</span>
+                                </div>
+                              </div>
+                            </div>
+
+                            {/* + New Purchase Link for this Customer */}
+                            <button
+                              type="button"
+                              onClick={() => handleGenerateCustomerLink(true, cg.customerName, cg.customerId)}
+                              disabled={generatingCustomerLink}
+                              className="px-3 py-1.5 rounded-xl bg-amber-400 hover:bg-amber-300 text-black font-cinzel font-bold text-[11px] uppercase tracking-wider flex items-center justify-center gap-1.5 transition-all shadow-sm active:scale-95 cursor-pointer disabled:opacity-50 shrink-0 self-start sm:self-auto"
+                              title={`Generate another purchase link for ${cg.customerName}`}
+                            >
+                              <Plus className="w-3.5 h-3.5 text-black stroke-[3]" />
+                              <span>+ Add Purchase Link</span>
+                            </button>
+                          </div>
+
+                          {/* Associated Links Table */}
+                          <div className="overflow-x-auto">
+                            <table className="w-full text-left text-xs">
+                              <thead className="bg-[#0e0e14] text-neutral-400 border-b border-neutral-800/80 uppercase font-cinzel text-[10px]">
+                                <tr>
+                                  <th className="py-2 px-3">Purchase #</th>
+                                  <th className="py-2 px-3">Token Prefix</th>
+                                  <th className="py-2 px-3">Assigned Box</th>
+                                  <th className="py-2 px-3">Status</th>
+                                  <th className="py-2 px-3">Device Binding</th>
+                                  <th className="py-2 px-3">Created</th>
+                                  <th className="py-2 px-3 text-right">Actions</th>
+                                </tr>
+                              </thead>
+                              <tbody className="divide-y divide-neutral-900">
+                                {cg.links.map((link) => (
+                                  <tr key={link.tokenHash} className="hover:bg-neutral-900/30 transition-colors">
+                                    <td className="py-2 px-3 font-cinzel font-bold text-amber-300 text-[11px]">
+                                      Purchase #{link.purchaseNumber || 1}
+                                    </td>
+                                    <td className="py-2 px-3 font-mono text-neutral-300 text-[11px]">
+                                      {link.tokenPrefix}...
+                                    </td>
+                                    <td className="py-2 px-3 font-mono text-xs">
+                                      {link.boxSerial && link.boxSerial !== 'UNASSIGNED' ? (
+                                        <span className="font-bold text-amber-300">{link.boxSerial}</span>
+                                      ) : (
+                                        <span className="text-neutral-500 italic">Available to choose</span>
+                                      )}
+                                    </td>
+                                    <td className="py-2 px-3">
+                                      {link.status === 'UNUSED' ? (
+                                        <span className="px-2 py-0.5 rounded-full bg-emerald-950/70 border border-emerald-500/50 text-emerald-300 text-[10px] font-bold">
+                                          READY / UNUSED
+                                        </span>
+                                      ) : link.status === 'ACTIVATED' ? (
+                                        <span className="px-2 py-0.5 rounded-full bg-cyan-950/70 border border-cyan-500/50 text-cyan-300 text-[10px] font-bold">
+                                          ACTIVATED / LOCKED
+                                        </span>
+                                      ) : link.status === 'CLAIMED' ? (
+                                        <span className="px-2 py-0.5 rounded-full bg-purple-950/70 border border-purple-500/50 text-purple-300 text-[10px] font-bold">
+                                          CLAIMED ({link.boxSerial})
+                                        </span>
+                                      ) : link.status === 'USED' ? (
+                                        <span className="px-2 py-0.5 rounded-full bg-neutral-900 border border-neutral-700 text-neutral-400 text-[10px] font-bold">
+                                          OPENED ({link.boxSerial})
+                                        </span>
+                                      ) : (
+                                        <span className="px-2 py-0.5 rounded-full bg-red-950/70 border border-red-500/50 text-red-300 text-[10px] font-bold">
+                                          REVOKED
+                                        </span>
+                                      )}
+                                    </td>
+                                    <td className="py-2 px-3 text-[11px] text-neutral-400">
+                                      {link.boundClientId ? (
+                                        <span className="inline-flex items-center gap-1 text-emerald-400">
+                                          <Check className="w-3 h-3 stroke-[3]" />
+                                          <span>Locked to Device</span>
+                                        </span>
+                                      ) : (
+                                        <span className="text-neutral-500 italic">Locks on first open</span>
+                                      )}
+                                    </td>
+                                    <td className="py-2 px-3 text-[10px] text-neutral-500 font-mono-numbers">
+                                      {new Date(link.createdAt).toLocaleDateString()}
+                                    </td>
+                                    <td className="py-2 px-3 text-right">
+                                      <div className="flex items-center justify-end gap-1.5">
+                                        <button
+                                          onClick={() => {
+                                            navigator.clipboard?.writeText(link.url);
+                                            showNotification('success', `Copied link: ${link.url}`);
+                                          }}
+                                          className="px-2 py-1 rounded bg-neutral-900 hover:bg-neutral-800 border border-neutral-700 text-neutral-300 hover:text-white text-[10px] font-cinzel font-bold uppercase transition-colors cursor-pointer"
+                                          title="Copy link to clipboard"
+                                        >
+                                          Copy
+                                        </button>
+                                        <button
+                                          onClick={() => {
+                                            const text = `🎉 *SUPER SURPRISE BOX (BATCH 1)*\n\nChoose your surprise box from 15,051 available boxes! 100 winning prizes including 4 Apple iPhones and 96 Cash Rewards.\n\nOpen your private customer link to select and claim your box:\n${link.url}`;
+                                            const waUrl = `https://api.whatsapp.com/send?text=${encodeURIComponent(text)}`;
+                                            window.open(waUrl, '_blank', 'noopener,noreferrer');
+                                          }}
+                                          className="px-2 py-1 rounded bg-[#25D366]/20 hover:bg-[#25D366]/40 border border-[#25D366]/50 text-[#25D366] text-[10px] font-cinzel font-bold uppercase transition-colors cursor-pointer"
+                                          title="Share on WhatsApp"
+                                        >
+                                          WhatsApp
+                                        </button>
+                                        {link.status !== 'REVOKED' && link.status !== 'USED' && (
+                                          <button
+                                            onClick={() => handleRevokeCustomerLink(link.tokenHash)}
+                                            className="px-2 py-1 rounded bg-red-950/40 hover:bg-red-900/60 border border-red-500/40 text-red-300 text-[10px] font-cinzel font-bold uppercase transition-colors cursor-pointer"
+                                            title="Revoke this customer link"
+                                          >
+                                            Revoke
+                                          </button>
+                                        )}
+                                      </div>
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                ) : (
+                  /* VIEW 2: FLAT LINK TABLE (All Purchase Links) */
+                  <div className="bg-[#0b0b10] border border-neutral-800 rounded-xl overflow-hidden shadow-lg">
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-left text-xs">
+                        <thead className="bg-[#101016] text-neutral-400 border-b border-neutral-800 uppercase font-cinzel text-[10px]">
+                          <tr>
+                            <th className="py-2.5 px-3">Associated Customer</th>
+                            <th className="py-2.5 px-3">Token Prefix</th>
+                            <th className="py-2.5 px-3">Assigned Box</th>
+                            <th className="py-2.5 px-3">Status</th>
+                            <th className="py-2.5 px-3">Device Binding</th>
+                            <th className="py-2.5 px-3">Created</th>
+                            <th className="py-2.5 px-3 text-right">Actions</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-neutral-900">
+                          {customerLinksLoading && customerLinks.length === 0 ? (
+                            <tr>
+                              <td colSpan={7} className="py-8 text-center text-neutral-500">
+                                <div className="w-5 h-5 border-2 border-amber-400 border-t-transparent rounded-full animate-spin mx-auto mb-1.5" />
+                                <span>Loading customer links...</span>
+                              </td>
+                            </tr>
+                          ) : customerLinks.length === 0 ? (
+                            <tr>
+                              <td colSpan={7} className="py-8 text-center text-neutral-500">
+                                No customer links generated yet. Click "GENERATE & COPY CUSTOMER LINK" above to create one.
+                              </td>
+                            </tr>
+                          ) : (
+                            customerLinks
+                              .filter((l) => !filterCustomerId || l.customerId === filterCustomerId)
+                              .map((link) => (
+                                <tr key={link.tokenHash} className="hover:bg-neutral-900/40 transition-colors">
+                                  <td className="py-2.5 px-3">
+                                    <div className="font-semibold text-white text-xs">
+                                      {link.customerName || 'Customer'}
+                                    </div>
+                                    <div className="text-[10px] text-amber-400 font-cinzel">
+                                      Purchase #{link.purchaseNumber || 1}
+                                    </div>
+                                  </td>
+                                  <td className="py-2.5 px-3 font-mono text-neutral-300 text-[11px]">
+                                    {link.tokenPrefix}...
+                                  </td>
+                                  <td className="py-2.5 px-3 font-mono text-xs">
+                                    {link.boxSerial && link.boxSerial !== 'UNASSIGNED' ? (
+                                      <span className="font-bold text-amber-300">{link.boxSerial}</span>
+                                    ) : (
+                                      <span className="text-neutral-500 italic">Available to choose</span>
+                                    )}
+                                  </td>
+                                  <td className="py-2.5 px-3">
+                                    {link.status === 'UNUSED' ? (
+                                      <span className="px-2 py-0.5 rounded-full bg-emerald-950/70 border border-emerald-500/50 text-emerald-300 text-[10px] font-bold">
+                                        READY / UNUSED
+                                      </span>
+                                    ) : link.status === 'ACTIVATED' ? (
+                                      <span className="px-2 py-0.5 rounded-full bg-cyan-950/70 border border-cyan-500/50 text-cyan-300 text-[10px] font-bold">
+                                        ACTIVATED / LOCKED
+                                      </span>
+                                    ) : link.status === 'CLAIMED' ? (
+                                      <span className="px-2 py-0.5 rounded-full bg-purple-950/70 border border-purple-500/50 text-purple-300 text-[10px] font-bold">
+                                        CLAIMED ({link.boxSerial})
+                                      </span>
+                                    ) : link.status === 'USED' ? (
+                                      <span className="px-2 py-0.5 rounded-full bg-neutral-900 border border-neutral-700 text-neutral-400 text-[10px] font-bold">
+                                        OPENED ({link.boxSerial})
+                                      </span>
+                                    ) : (
+                                      <span className="px-2 py-0.5 rounded-full bg-red-950/70 border border-red-500/50 text-red-300 text-[10px] font-bold">
+                                        REVOKED
+                                      </span>
+                                    )}
+                                  </td>
+                                  <td className="py-2.5 px-3 text-[11px] text-neutral-400">
+                                    {link.boundClientId ? (
+                                      <span className="inline-flex items-center gap-1 text-emerald-400">
+                                        <Check className="w-3 h-3 stroke-[3]" />
+                                        <span>Locked to Device</span>
+                                      </span>
+                                    ) : (
+                                      <span className="text-neutral-500 italic">Locks on first open</span>
+                                    )}
+                                  </td>
+                                  <td className="py-2.5 px-3 text-[10px] text-neutral-500 font-mono-numbers">
+                                    {new Date(link.createdAt).toLocaleDateString()}
+                                  </td>
+                                  <td className="py-2.5 px-3 text-right">
+                                    <div className="flex items-center justify-end gap-1.5">
+                                      <button
+                                        onClick={() => {
+                                          navigator.clipboard?.writeText(link.url);
+                                          showNotification('success', `Copied link: ${link.url}`);
+                                        }}
+                                        className="px-2 py-1 rounded bg-neutral-900 hover:bg-neutral-800 border border-neutral-700 text-neutral-300 hover:text-white text-[10px] font-cinzel font-bold uppercase transition-colors cursor-pointer"
+                                        title="Copy link to clipboard"
+                                      >
+                                        Copy
+                                      </button>
+                                      <button
+                                        onClick={() => {
+                                          const text = `🎉 *SUPER SURPRISE BOX (BATCH 1)*\n\nChoose your surprise box from 15,051 available boxes! 100 winning prizes including 4 Apple iPhones and 96 Cash Rewards.\n\nOpen your private customer link to select and claim your box:\n${link.url}`;
+                                          const waUrl = `https://api.whatsapp.com/send?text=${encodeURIComponent(text)}`;
+                                          window.open(waUrl, '_blank', 'noopener,noreferrer');
+                                        }}
+                                        className="px-2 py-1 rounded bg-[#25D366]/20 hover:bg-[#25D366]/40 border border-[#25D366]/50 text-[#25D366] text-[10px] font-cinzel font-bold uppercase transition-colors cursor-pointer"
+                                        title="Share on WhatsApp"
+                                      >
+                                        WhatsApp
+                                      </button>
+                                      {link.status !== 'REVOKED' && link.status !== 'USED' && (
+                                        <button
+                                          onClick={() => handleRevokeCustomerLink(link.tokenHash)}
+                                          className="px-2 py-1 rounded bg-red-950/40 hover:bg-red-900/60 border border-red-500/40 text-red-300 text-[10px] font-cinzel font-bold uppercase transition-colors cursor-pointer"
+                                          title="Revoke this customer link"
+                                        >
+                                          Revoke
+                                        </button>
+                                      )}
+                                    </div>
+                                  </td>
+                                </tr>
+                              ))
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* 3. Public Customer Website URL Configuration */}
               <div className="mb-6 space-y-3">
                 <div className="flex items-center justify-between">
                   <label className="text-[11px] font-semibold text-neutral-300 uppercase font-cinzel tracking-wider block">
@@ -1827,91 +2433,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBackToCustomer
                         </button>
                       </div>
                     </div>
-
-                    {customerUrlConfig?.suggestedSharedUrl && !customerUrlConfig.suggestedSharedUrl.includes('ais-dev-') && (
-                      <div className="flex items-center gap-2 text-[11px] text-neutral-400">
-                        <span>AI Studio Shared URL:</span>
-                        <button
-                          type="button"
-                          onClick={() => setUrlInputValue(customerUrlConfig.suggestedSharedUrl)}
-                          className="text-amber-400 hover:underline font-mono text-[10px] truncate max-w-md text-left"
-                        >
-                          {customerUrlConfig.suggestedSharedUrl}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setUrlInputValue(customerUrlConfig.suggestedSharedUrl)}
-                          className="px-1.5 py-0.5 rounded bg-neutral-800 hover:bg-neutral-700 text-neutral-300 text-[10px] shrink-0"
-                        >
-                          Use This
-                        </button>
-                      </div>
-                    )}
                   </div>
                 )}
-
-                {/* Verification Feedback Notice */}
-                {urlTestFeedback && (
-                  <div
-                    className={`p-3 rounded-xl border text-xs flex items-start gap-2.5 ${
-                      urlTestFeedback.success
-                        ? 'bg-emerald-950/40 border-emerald-500/40 text-emerald-200'
-                        : 'bg-red-950/40 border-red-500/40 text-red-200'
-                    }`}
-                  >
-                    {urlTestFeedback.success ? (
-                      <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
-                    ) : (
-                      <AlertCircle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
-                    )}
-                    <div className="space-y-1">
-                      <div className="font-bold">
-                        {urlTestFeedback.success
-                          ? 'Verification Successful: Publicly Accessible'
-                          : 'Public Verification Failed'}
-                      </div>
-                      <p className="text-[11px] leading-relaxed text-neutral-300">
-                        {urlTestFeedback.message}
-                      </p>
-                    </div>
-                  </div>
-                )}
-
-                <p className="text-[11px] text-neutral-500 leading-normal">
-                  Customers who open this link will directly access the complete interactive inventory grid to browse, search, and claim any available box.
-                </p>
-              </div>
-
-              {/* The Two Official Buttons: COPY CUSTOMER LINK & SHARE VIA WHATSAPP */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5 pt-2">
-                {/* Button 1: COPY CUSTOMER LINK */}
-                <button
-                  type="button"
-                  onClick={handleCopyCustomerLink}
-                  className="w-full py-3.5 px-6 rounded-xl bg-gradient-to-r from-amber-400 via-yellow-400 to-amber-500 hover:from-amber-300 hover:to-yellow-300 text-black font-cinzel font-bold text-xs sm:text-sm uppercase tracking-wider flex items-center justify-center gap-2.5 transition-all shadow-[0_4px_20px_rgba(245,158,11,0.25)] active:scale-[0.98] cursor-pointer"
-                >
-                  {copiedCommonLink ? (
-                    <>
-                      <Check className="w-4 h-4 text-black stroke-[3]" />
-                      <span>LINK COPIED TO CLIPBOARD!</span>
-                    </>
-                  ) : (
-                    <>
-                      <Copy className="w-4 h-4 text-black stroke-[2.5]" />
-                      <span>COPY CUSTOMER LINK</span>
-                    </>
-                  )}
-                </button>
-
-                {/* Button 2: SHARE VIA WHATSAPP */}
-                <button
-                  type="button"
-                  onClick={handleShareWhatsAppCommon}
-                  className="w-full py-3.5 px-6 rounded-xl bg-[#25D366] hover:bg-[#20ba5a] text-white font-cinzel font-bold text-xs sm:text-sm uppercase tracking-wider flex items-center justify-center gap-2.5 transition-all shadow-[0_4px_20px_rgba(37,211,102,0.3)] active:scale-[0.98] cursor-pointer"
-                >
-                  <MessageCircle className="w-4 h-4 text-white stroke-[2.5]" />
-                  <span>SHARE VIA WHATSAPP</span>
-                </button>
               </div>
 
               {/* Security & Architecture Highlights */}
@@ -1919,30 +2442,30 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBackToCustomer
                 <div className="p-3.5 rounded-xl bg-neutral-950/60 border border-neutral-800">
                   <div className="text-amber-300 font-cinzel font-bold mb-1 flex items-center gap-1.5">
                     <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-                    <span>Single Common Link</span>
+                    <span>Single Customer Link</span>
                   </div>
                   <p className="text-[11px] leading-relaxed">
-                    All customers use this single URL. No need to generate, manage, or replace 15,051 individual links.
+                    Generate one customer-specific link from the Admin Portal, not separate links for all 15,051 boxes.
                   </p>
                 </div>
 
                 <div className="p-3.5 rounded-xl bg-neutral-950/60 border border-neutral-800">
                   <div className="text-amber-300 font-cinzel font-bold mb-1 flex items-center gap-1.5">
                     <Lock className="w-3.5 h-3.5 text-amber-400" />
-                    <span>Atomic Claim Protection</span>
+                    <span>Device Locked & Bound</span>
                   </div>
                   <p className="text-[11px] leading-relaxed">
-                    When a customer chooses a box, backend serializable locks prevent any box from being claimed twice.
+                    Only the intended customer may activate and use the link. Forwarded recipients are denied access.
                   </p>
                 </div>
 
                 <div className="p-3.5 rounded-xl bg-neutral-950/60 border border-neutral-800">
                   <div className="text-amber-300 font-cinzel font-bold mb-1 flex items-center gap-1.5">
                     <Sparkles className="w-3.5 h-3.5 text-yellow-400" />
-                    <span>100 Winning Prizes Intact</span>
+                    <span>All Available Boxes Displayed</span>
                   </div>
                   <p className="text-[11px] leading-relaxed">
-                    All 4 Apple iPhones and 96 Cash Prizes remain securely allocated and hidden until customer reveal.
+                    When the customer opens the link, all available boxes are displayed for them to choose and claim.
                   </p>
                 </div>
               </div>
