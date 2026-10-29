@@ -48,6 +48,7 @@ export interface CustomerSession {
   opened: boolean;
   used?: boolean;
   alreadyUsed?: boolean;
+  isMainPage?: boolean;
   revoked?: boolean;
   forbidden?: boolean;
   isForwardedLink?: boolean;

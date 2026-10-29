@@ -32,8 +32,14 @@ export default function App() {
       path === '/admin' ||
       path === '/admin/' ||
       path.startsWith('/admin') ||
-      search.includes('admin') ||
+      (search.includes('admin') && !search.includes('token') && !search.includes('box')) ||
       hash.includes('admin');
+
+    // Customer link takes priority over background admin session when ?token=... or ?box=... is in URL
+    const hasCustomerTokenParam = search.includes('token=') || search.includes('box=') || search.includes('serial=') || search.includes('id=');
+    if (hasCustomerTokenParam && !path.startsWith('/admin')) {
+      return false;
+    }
 
     // If admin explicitly requested to preview customer view
     const isPreviewingCustomer = sessionStorage.getItem('ssb_preview_customer') === 'true';
@@ -58,7 +64,13 @@ export default function App() {
   // Listen for browser popstate, hashchange, storage, or route changes
   useEffect(() => {
     const handleLocationCheck = () => {
-      setIsAdminView(checkIsAdminView());
+      const nextIsAdmin = checkIsAdminView();
+      setIsAdminView(nextIsAdmin);
+      if (!nextIsAdmin) {
+        const params = new URLSearchParams(window.location.search);
+        const token = params.get('token') || params.get('box') || params.get('serial') || params.get('id');
+        loadTokenSession(token);
+      }
     };
     window.addEventListener('popstate', handleLocationCheck);
     window.addEventListener('hashchange', handleLocationCheck);
@@ -92,6 +104,7 @@ export default function App() {
 
   const loadTokenSession = async (token?: string | null) => {
     setSessionLoading(true);
+    setActiveResult(null);
 
     const explicitToken = token?.trim() || null;
     const storedToken = typeof localStorage !== 'undefined' ? localStorage.getItem('ssb_customer_token')?.trim() : null;

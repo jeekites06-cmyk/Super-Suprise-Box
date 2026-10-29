@@ -386,11 +386,7 @@
       "assignedBox": "SS00000005",
       "batchId": 1,
       "opened": false,
-      "used": false,
-      "boundClientId": "cust_device_sarah_1",
-      "boundClientIp": "127.0.0.1",
-      "boundClientUa": "node",
-      "boundAt": "2026-10-27T13:24:24.505Z"
+      "used": false
     },
     "SSB_CUST_fAISh2_lmPeJ9Je4h31i4vEDOOc": {
       "token": "SSB_CUST_fAISh2_lmPeJ9Je4h31i4vEDOOc",
@@ -398,11 +394,51 @@
       "assignedBox": "SS00000008",
       "batchId": 1,
       "opened": false,
+      "used": false
+    },
+    "SSB_CUST_0Jy7H9xBL4atmVRciDMT70d3hiU": {
+      "token": "SSB_CUST_0Jy7H9xBL4atmVRciDMT70d3hiU",
+      "hasClaimed": false,
+      "assignedBox": null,
+      "batchId": 1,
+      "opened": false,
       "used": false,
-      "boundClientId": "cust_device_sarah_1",
+      "boundClientId": "dev_test_device_1",
       "boundClientIp": "127.0.0.1",
-      "boundClientUa": "node",
-      "boundAt": "2026-10-27T13:24:26.361Z"
+      "boundClientUa": "",
+      "boundAt": "2026-10-29T11:55:01.674Z"
+    },
+    "SSB_CUST_VeK5m7iEva_947_S4_Z9mDoViBk": {
+      "token": "SSB_CUST_VeK5m7iEva_947_S4_Z9mDoViBk",
+      "hasClaimed": true,
+      "assignedBox": "SS00000003",
+      "batchId": 1,
+      "opened": false,
+      "used": false
+    },
+    "SSB_CUST_z2WMelvz29xdnrDZ452bH6SAIBE": {
+      "token": "SSB_CUST_z2WMelvz29xdnrDZ452bH6SAIBE",
+      "hasClaimed": true,
+      "assignedBox": "SS00000004",
+      "batchId": 1,
+      "opened": false,
+      "used": false,
+      "boundClientId": "dev_charlie_phone_abc",
+      "boundClientIp": "127.0.0.1",
+      "boundClientUa": "",
+      "boundAt": "2026-10-29T12:02:16.417Z"
+    },
+    "SSB_CUST_Ma_1z-c0ZC-YQLz88hEOw0fI6Jc": {
+      "token": "SSB_CUST_Ma_1z-c0ZC-YQLz88hEOw0fI6Jc",
+      "hasClaimed": true,
+      "assignedBox": "SS00000006",
+      "batchId": 1,
+      "opened": false,
+      "used": false,
+      "boundClientId": "dev_charlie_phone_abc",
+      "boundClientIp": "127.0.0.1",
+      "boundClientUa": "",
+      "boundAt": "2026-10-29T12:02:18.624Z"
     }
   },
   "customerLinks": {
@@ -421,7 +457,8 @@
       "rawToken": "SSB_bH1KnOE8K4j4yKqW8Q6sF5Fngu3Szs-W",
       "customerId": "vip_customer_test__1",
       "customerName": "VIP Customer Test #1",
-      "purchaseNumber": 1
+      "purchaseNumber": 1,
+      "boundAt": null
     },
     "7a05b5cfbfa65f94b710b150ae290b46decdf0906ca1c1171807711443421754": {
       "id": 2,
@@ -438,7 +475,8 @@
       "rawToken": "SSB_ajW6rDvQ8DuqZCInmVM4SyI6N2OSzbDO",
       "customerId": "concurrency_test",
       "customerName": "Concurrency Test",
-      "purchaseNumber": 1
+      "purchaseNumber": 1,
+      "boundAt": null
     },
     "bd97047d58259e4b0fe4e13d769e633bf0fb41e15a3c1ac0bfc9f2c4869f9e45": {
       "id": 3,
@@ -455,7 +493,8 @@
       "rawToken": "SSB_6IWAiT3hz8YwFEJfiSWAXHob0t1Wfhyw",
       "customerId": "to_be_revoked",
       "customerName": "To be revoked",
-      "purchaseNumber": 1
+      "purchaseNumber": 1,
+      "boundAt": null
     },
     "850ff2780c70b9327f4b9670a433c26b4fc205a8e9f8d09aa7d06a315596a8c1": {
       "id": 4,
@@ -472,7 +511,8 @@
       "rawToken": "SSB_x-VYff5W0xv4Xlg5tWELewquyT9ePH3K",
       "customerId": "to_be_revoked",
       "customerName": "To be revoked",
-      "purchaseNumber": 1
+      "purchaseNumber": 1,
+      "boundAt": null
     },
     "4833fd434d514b4dd768318720c3f36a5ca379875b2430f2d37aa79f5b740c62": {
       "id": 5,
@@ -489,7 +529,8 @@
       "rawToken": "SSB_KEN1YajGSzaJdjNXIQ_Z2HnDwqSk3YZe",
       "customerId": "replacement_link",
       "customerName": "Replacement link",
-      "purchaseNumber": 1
+      "purchaseNumber": 1,
+      "boundAt": null
     },
     "05fb77a8875347c3b4bcbc12af54e502f44fc4333da9329c57dad2bf911be760": {
       "id": 6,
@@ -506,7 +547,8 @@
       "rawToken": "SSB_zhWyJx-z2jNrByWa-IUBLljCw90uRbil",
       "customerId": "vip_customer_test__1",
       "customerName": "VIP Customer Test #1",
-      "purchaseNumber": 1
+      "purchaseNumber": 1,
+      "boundAt": null
     },
     "5cb3fa816d1f9577c3a90c1b45af4bc08783f27f78c6e7d295900bec42511bdc": {
       "id": 7,
@@ -523,7 +565,8 @@
       "rawToken": "SSB_dkRs5pDRJTfZgmDqnHW2Xp7mZlXchaDH",
       "customerId": "concurrency_test",
       "customerName": "Concurrency Test",
-      "purchaseNumber": 1
+      "purchaseNumber": 1,
+      "boundAt": null
     },
     "3ca1f1c67223fbd451e74fda71f1f14801ac5dccbe8f387fb476229242a3f843": {
       "id": 8,
@@ -540,7 +583,8 @@
       "rawToken": "SSB_KYfp0IMueK11lDz_vLpD2XaJarIejVBe",
       "customerId": "replacement_link",
       "customerName": "Replacement link",
-      "purchaseNumber": 1
+      "purchaseNumber": 1,
+      "boundAt": null
     },
     "0a5b3fa3a86b68fb8879405124cde6cb161cff4ef8042dc8882ab8b8dccedccd": {
       "id": 9,
@@ -557,7 +601,8 @@
       "rawToken": "SSB_DXv2DwGL0uWrZWNCXcXtGcMxnK0UO-vY",
       "customerId": "vip_customer_test__1",
       "customerName": "VIP Customer Test #1",
-      "purchaseNumber": 1
+      "purchaseNumber": 1,
+      "boundAt": null
     },
     "106b214b23ff9f4a8e6109c8aef941ecfc25fb18b84931f04edaf2df3161b571": {
       "id": 10,
@@ -574,7 +619,8 @@
       "rawToken": "SSB_a205JW1zL5KFL2N5Pa1knfIYk9_zyOPR",
       "customerId": "concurrency_test",
       "customerName": "Concurrency Test",
-      "purchaseNumber": 1
+      "purchaseNumber": 1,
+      "boundAt": null
     },
     "601133144e0bcee65e4850ef384c7243dbf3ccd902496dbcc2a9acb7288bd56e": {
       "id": 11,
@@ -591,7 +637,8 @@
       "rawToken": "SSB_0MBS0y0IUxAvELkfGQMDygl2-qDcuQRl",
       "customerId": "replacement_link",
       "customerName": "Replacement link",
-      "purchaseNumber": 1
+      "purchaseNumber": 1,
+      "boundAt": null
     },
     "b465c7b3e3cb8b0ab6e5f1f220c1cff36d3170035b59c1b8a4ef2ad76f15e211": {
       "id": 12,
@@ -608,7 +655,8 @@
       "rawToken": "SSB_wNiKchxsYc9nODFc1VfRscJjYznz3_ip",
       "customerId": "customer_1",
       "customerName": "Customer 1",
-      "purchaseNumber": 1
+      "purchaseNumber": 1,
+      "boundAt": null
     },
     "027897f308a05f0d6b67fb24d50733991f91db4de00a5f58836d48b656d6714b": {
       "id": 13,
@@ -625,7 +673,8 @@
       "rawToken": "SSB_V7HHn_queSEhvZww-F6SnGzcmQKrqC_i",
       "customerId": "test_link_for_alice",
       "customerName": "Test Link for Alice",
-      "purchaseNumber": 1
+      "purchaseNumber": 1,
+      "boundAt": null
     },
     "db2e1e4711324bb4e5d2136a6057f45d99212949bb068d48cf9101601cee2697": {
       "id": 1793104879922,
@@ -727,7 +776,8 @@
       "rawToken": "SSB_CUST_pKKNSTCEaRN_FM4pnVQYMtwcSSY",
       "customerId": "customer_vip_alice",
       "customerName": "Customer VIP Alice",
-      "purchaseNumber": 1
+      "purchaseNumber": 1,
+      "boundAt": null
     },
     "7122c706d5a135c73faf37f50296b537b06c2c914fdad7d30c350b13989653fc": {
       "id": 22,
@@ -736,7 +786,7 @@
       "boxId": 5,
       "boxSerial": "SS00000005",
       "status": "USED",
-      "createdAt": "2026-10-27T13:24:22.675Z",
+      "createdAt": "2026-10-27T13:24:24.024Z",
       "usedAt": "2026-10-27T13:24:25.614Z",
       "revokedAt": null,
       "createdBy": "admin",
@@ -745,11 +795,7 @@
       "customerId": "sarah_jenkins",
       "customerName": "Sarah Jenkins",
       "purchaseNumber": 1,
-      "boundClientId": "cust_device_sarah_1",
-      "boundClientIp": "127.0.0.1",
-      "boundClientUa": "node",
-      "boundAt": "2026-10-27T13:24:24.495Z",
-      "activatedAt": "2026-10-27T13:24:24.495Z"
+      "boundAt": null
     },
     "8f59e67f572e9ec04e2c2ac5887b0d4c226111b29932f2c70521ed92dd56d768": {
       "id": 23,
@@ -758,7 +804,7 @@
       "boxId": 8,
       "boxSerial": "SS00000008",
       "status": "USED",
-      "createdAt": "2026-10-27T13:24:24.128Z",
+      "createdAt": "2026-10-27T13:24:24.395Z",
       "usedAt": "2026-10-27T13:24:27.437Z",
       "revokedAt": null,
       "createdBy": "admin",
@@ -767,11 +813,141 @@
       "customerId": "sarah_jenkins",
       "customerName": "Sarah Jenkins",
       "purchaseNumber": 2,
-      "boundClientId": "cust_device_sarah_1",
+      "boundAt": null
+    },
+    "86099cbd9d432c6cbe9e321afab08af5e4f9870b833f0cb936a31699b715507b": {
+      "id": 24,
+      "tokenHash": "86099cbd9d432c6cbe9e321afab08af5e4f9870b833f0cb936a31699b715507b",
+      "tokenPrefix": "SSB_CUST_0Jy",
+      "boxId": 1,
+      "boxSerial": "UNASSIGNED",
+      "status": "ACTIVATED",
+      "createdAt": "2026-10-29T11:55:01.548Z",
+      "usedAt": null,
+      "revokedAt": null,
+      "createdBy": "admin",
+      "note": "Alice Test",
+      "rawToken": "SSB_CUST_0Jy7H9xBL4atmVRciDMT70d3hiU",
+      "customerId": "alice",
+      "customerName": "Alice",
+      "purchaseNumber": 1,
+      "boundAt": null
+    },
+    "05bf3452a8cca1abdf90dd0499c40a5b80de085760d17bcb778ade5c8424c4f7": {
+      "id": 25,
+      "tokenHash": "05bf3452a8cca1abdf90dd0499c40a5b80de085760d17bcb778ade5c8424c4f7",
+      "tokenPrefix": "SSB_CUST_C57",
+      "boxId": 1,
+      "boxSerial": "UNASSIGNED",
+      "status": "ACTIVATED",
+      "createdAt": "2026-10-29T11:55:01.964Z",
+      "usedAt": null,
+      "revokedAt": null,
+      "createdBy": "admin",
+      "note": "Alice - Purchase #2",
+      "rawToken": "SSB_CUST_C57V5zmvri2XUYSyNX_21gy_iJw",
+      "customerId": "alice",
+      "customerName": "Alice",
+      "purchaseNumber": 2,
+      "boundAt": null
+    },
+    "1b0490e188185318dd5b8e0888723f49b65c74dbf834c338ce42046b47a22e77": {
+      "id": 26,
+      "tokenHash": "1b0490e188185318dd5b8e0888723f49b65c74dbf834c338ce42046b47a22e77",
+      "tokenPrefix": "SSB_CUST_32t",
+      "boxId": 1,
+      "boxSerial": "UNASSIGNED",
+      "status": "ACTIVATED",
+      "createdAt": "2026-10-29T11:55:02.337Z",
+      "usedAt": null,
+      "revokedAt": null,
+      "createdBy": "admin",
+      "note": "Alice - Purchase #3",
+      "rawToken": "SSB_CUST_32tt7O54VhW7WmitBSJEZqoDx0w",
+      "customerId": "alice",
+      "customerName": "Alice",
+      "purchaseNumber": 3,
+      "boundAt": null
+    },
+    "e5a280375a802efcc14dda95841e98af5c1fc48ab5b467016f5d8d77b6d4daea": {
+      "id": 27,
+      "tokenHash": "e5a280375a802efcc14dda95841e98af5c1fc48ab5b467016f5d8d77b6d4daea",
+      "tokenPrefix": "SSB_CUST_VeK",
+      "boxId": 3,
+      "boxSerial": "SS00000003",
+      "status": "USED",
+      "createdAt": "2026-10-29T11:55:47.798Z",
+      "usedAt": "2026-10-29T11:55:48.997Z",
+      "revokedAt": null,
+      "createdBy": "admin",
+      "note": "Bob Test",
+      "rawToken": "SSB_CUST_VeK5m7iEva_947_S4_Z9mDoViBk",
+      "customerId": "bob",
+      "customerName": "Bob",
+      "purchaseNumber": 1,
+      "boundAt": null
+    },
+    "40341010737f9ef13edc0b10a04748990589220da513daad91bc16183c8cddcb": {
+      "id": 28,
+      "tokenHash": "40341010737f9ef13edc0b10a04748990589220da513daad91bc16183c8cddcb",
+      "tokenPrefix": "SSB_CUST_SOw",
+      "boxId": 1,
+      "boxSerial": "UNASSIGNED",
+      "status": "ACTIVATED",
+      "createdAt": "2026-10-29T11:55:49.999Z",
+      "usedAt": null,
+      "revokedAt": null,
+      "createdBy": "admin",
+      "note": "Bob - Purchase #2",
+      "rawToken": "SSB_CUST_SOwgSho5J0Q9ejjDg5tl9PmImxc",
+      "customerId": "bob",
+      "customerName": "Bob",
+      "purchaseNumber": 2,
+      "boundAt": null
+    },
+    "391b35ad3338e3784a249247e5011dd72d31a7d82cdc7a1f6d0ad10d13e73222": {
+      "id": 29,
+      "tokenHash": "391b35ad3338e3784a249247e5011dd72d31a7d82cdc7a1f6d0ad10d13e73222",
+      "tokenPrefix": "SSB_CUST_z2W",
+      "boxId": 4,
+      "boxSerial": "SS00000004",
+      "status": "USED",
+      "createdAt": "2026-10-29T12:02:14.934Z",
+      "usedAt": "2026-10-29T12:02:17.511Z",
+      "revokedAt": null,
+      "createdBy": "admin",
+      "note": "Charlie Order #1",
+      "rawToken": "SSB_CUST_z2WMelvz29xdnrDZ452bH6SAIBE",
+      "customerId": "charlie",
+      "customerName": "Charlie",
+      "purchaseNumber": 1,
+      "boundClientId": "dev_charlie_phone_abc",
       "boundClientIp": "127.0.0.1",
-      "boundClientUa": "node",
-      "boundAt": "2026-10-27T13:24:26.357Z",
-      "activatedAt": "2026-10-27T13:24:26.357Z"
+      "boundClientUa": "",
+      "boundAt": "2026-10-29T12:02:16.411Z",
+      "activatedAt": "2026-10-29T12:02:16.411Z"
+    },
+    "50e475a45f88c800b0d484866e4e3340711555cb9ee4174b100cb566be79482c": {
+      "id": 30,
+      "tokenHash": "50e475a45f88c800b0d484866e4e3340711555cb9ee4174b100cb566be79482c",
+      "tokenPrefix": "SSB_CUST_Ma_",
+      "boxId": 6,
+      "boxSerial": "SS00000006",
+      "status": "USED",
+      "createdAt": "2026-10-29T12:02:18.256Z",
+      "usedAt": "2026-10-29T12:02:19.732Z",
+      "revokedAt": null,
+      "createdBy": "admin",
+      "note": "Charlie - Purchase #2",
+      "rawToken": "SSB_CUST_Ma_1z-c0ZC-YQLz88hEOw0fI6Jc",
+      "customerId": "charlie",
+      "customerName": "Charlie",
+      "purchaseNumber": 2,
+      "boundClientId": "dev_charlie_phone_abc",
+      "boundClientIp": "127.0.0.1",
+      "boundClientUa": "",
+      "boundAt": "2026-10-29T12:02:18.621Z",
+      "activatedAt": "2026-10-29T12:02:18.621Z"
     }
   }
 }

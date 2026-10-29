@@ -518,6 +518,10 @@ async function initDatabase(): Promise<void> {
                 customerId,
                 customerName,
                 purchaseNumber,
+                boundClientId: row.bound_client_id || undefined,
+                boundClientIp: row.bound_client_ip || undefined,
+                boundClientUa: row.bound_client_ua || undefined,
+                boundAt: row.bound_at ? new Date(row.bound_at).toISOString() : null,
               };
               customerLinksMap.set(linkRec.tokenHash, linkRec);
               storeData.customerLinks[linkRec.tokenHash] = linkRec;
@@ -1657,11 +1661,15 @@ app.post('/api/admin/links/generate', requireAdminAuth, async (req: Request, res
   let linkId = Date.now();
   if (neonPool) {
     try {
-      // Ensure customer association columns exist
+      // Ensure customer association and device binding columns exist
       await neonPool.query(`
         ALTER TABLE public.customer_links ADD COLUMN IF NOT EXISTS customer_id VARCHAR(255);
         ALTER TABLE public.customer_links ADD COLUMN IF NOT EXISTS customer_name VARCHAR(255);
         ALTER TABLE public.customer_links ADD COLUMN IF NOT EXISTS purchase_number INT DEFAULT 1;
+        ALTER TABLE public.customer_links ADD COLUMN IF NOT EXISTS bound_client_id VARCHAR(255);
+        ALTER TABLE public.customer_links ADD COLUMN IF NOT EXISTS bound_client_ip VARCHAR(255);
+        ALTER TABLE public.customer_links ADD COLUMN IF NOT EXISTS bound_client_ua TEXT;
+        ALTER TABLE public.customer_links ADD COLUMN IF NOT EXISTS bound_at TIMESTAMP WITH TIME ZONE;
       `).catch(() => {});
 
       const insRes = await neonPool.query(`
@@ -2160,8 +2168,8 @@ app.get('/api/customer/session', (req: Request, res: Response): void => {
 
         if (neonPool) {
           neonPool.query(
-            `UPDATE public.customer_links SET status = $1 WHERE token_hash = $2`,
-            [link.status, link.tokenHash]
+            `UPDATE public.customer_links SET status = $1, bound_client_id = $2, bound_client_ip = $3, bound_client_ua = $4, bound_at = $5 WHERE token_hash = $6`,
+            [link.status, link.boundClientId, link.boundClientIp, link.boundClientUa, link.boundAt, link.tokenHash]
           ).catch((e) => console.error('[DATABASE] Error updating link status in Neon:', e));
         }
 
@@ -2358,6 +2366,12 @@ app.post('/api/boxes/claim', async (req: Request, res: Response): Promise<void> 
         link.boundClientIp = (req.headers['x-forwarded-for'] as string) || req.ip;
         link.boundClientUa = req.headers['user-agent'] || '';
         link.boundAt = new Date().toISOString();
+        if (neonPool) {
+          neonPool.query(
+            `UPDATE public.customer_links SET bound_client_id = $1, bound_client_ip = $2, bound_client_ua = $3, bound_at = $4 WHERE token_hash = $5`,
+            [link.boundClientId, link.boundClientIp, link.boundClientUa, link.boundAt, link.tokenHash]
+          ).catch((e) => console.error('[DATABASE] Error updating link binding in Neon:', e));
+        }
         saveStoreToDisk();
       }
     }
@@ -2591,6 +2605,12 @@ app.post('/api/customer/open', async (req: Request, res: Response): Promise<void
           link.boundClientIp = (req.headers['x-forwarded-for'] as string) || req.ip;
           link.boundClientUa = req.headers['user-agent'] || '';
           link.boundAt = new Date().toISOString();
+          if (neonPool) {
+            neonPool.query(
+              `UPDATE public.customer_links SET bound_client_id = $1, bound_client_ip = $2, bound_client_ua = $3, bound_at = $4 WHERE token_hash = $5`,
+              [link.boundClientId, link.boundClientIp, link.boundClientUa, link.boundAt, link.tokenHash]
+            ).catch((e) => console.error('[DATABASE] Error updating link binding in Neon:', e));
+          }
           saveStoreToDisk();
         }
       }
