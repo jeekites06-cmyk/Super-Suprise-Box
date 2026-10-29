@@ -83,11 +83,16 @@ export async function fetchCustomerSession(token?: string | null): Promise<Custo
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 4000);
 
+    const headers: Record<string, string> = {
+      'x-customer-client-id': clientId,
+      'x-customer-token': cleanToken,
+    };
+    if (savedToken && savedToken !== cleanToken) {
+      headers['x-customer-previous-token'] = savedToken;
+    }
+
     const res = await fetch(`/api/customer/session?token=${encodeURIComponent(cleanToken)}`, {
-      headers: {
-        'x-customer-client-id': clientId,
-        'x-customer-token': cleanToken,
-      },
+      headers,
       signal: controller.signal,
     });
     clearTimeout(timeoutId);

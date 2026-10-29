@@ -307,16 +307,21 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBackToCustomer
         if (data.customers) {
           setCustomerGroups(data.customers);
         }
-        if (data.links && data.links.length > 0 && !latestCustomerLink) {
-          setLatestCustomerLink(data.links[0]);
-        }
       }
     } catch (err) {
       console.error('Failed to fetch customer links:', err);
     } finally {
       setCustomerLinksLoading(false);
     }
-  }, [token, latestCustomerLink]);
+  }, [token]);
+
+  const handleStartNextPurchase = () => {
+    setCustomerNameInput('');
+    setSelectedCustomerId('');
+    setCustomerNoteInput('');
+    setLatestCustomerLink(null);
+    showNotification('success', 'Ready for next purchase. Enter customer name.');
+  };
 
   const handleGenerateCustomerLink = async (
     autoCopy = false,
@@ -978,7 +983,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBackToCustomer
                 </span>
               </div>
               <span className="text-[10px] text-neutral-400">
-                Persistent Database: <strong className="text-emerald-400">Connected (/data/boxes.json)</strong>
+                Persistent Database: <strong className="text-emerald-400">Connected (Neon PostgreSQL)</strong>
               </span>
             </div>
           </div>
@@ -1843,16 +1848,31 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBackToCustomer
                       )}
                     </div>
                     <div className="flex gap-1.5">
-                      <input
-                        type="text"
-                        value={customerNameInput}
-                        onChange={(e) => {
-                          setCustomerNameInput(e.target.value);
-                          setSelectedCustomerId('');
-                        }}
-                        placeholder="Enter Customer Name (e.g. John Doe, +91 98...)"
-                        className="flex-1 px-3 py-2 bg-neutral-900 border border-neutral-700 focus:border-amber-400 rounded-xl text-xs text-white placeholder-neutral-500 focus:outline-none"
-                      />
+                      <div className="relative flex-1">
+                        <input
+                          type="text"
+                          value={customerNameInput}
+                          onChange={(e) => {
+                            setCustomerNameInput(e.target.value);
+                            setSelectedCustomerId('');
+                          }}
+                          placeholder="Enter Customer Name (e.g. John Doe, +91 98...)"
+                          className="w-full px-3 py-2 pr-8 bg-neutral-900 border border-neutral-700 focus:border-amber-400 rounded-xl text-xs text-white placeholder-neutral-500 focus:outline-none"
+                        />
+                        {customerNameInput && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setCustomerNameInput('');
+                              setSelectedCustomerId('');
+                            }}
+                            className="absolute right-2.5 top-1/2 -translate-y-1/2 text-neutral-400 hover:text-white cursor-pointer"
+                            title="Clear customer name"
+                          >
+                            <X className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                      </div>
                       {customerGroups.length > 0 && (
                         <select
                           value={selectedCustomerId}
@@ -1941,9 +1961,19 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBackToCustomer
                           {latestCustomerLink.customerName || 'Customer'} (Purchase #{latestCustomerLink.purchaseNumber || 1})
                         </span>
                       </div>
-                      <span className="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 text-[10px] font-mono font-bold uppercase">
-                        {latestCustomerLink.status}
-                      </span>
+                      <div className="flex items-center gap-2">
+                        <span className="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 text-[10px] font-mono font-bold uppercase">
+                          {latestCustomerLink.status}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => setLatestCustomerLink(null)}
+                          className="p-1 rounded-lg text-neutral-400 hover:text-white hover:bg-neutral-800 transition-colors cursor-pointer"
+                          title="Close preview (link remains saved and active below)"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
                     </div>
 
                     <div className="flex items-center gap-2 bg-neutral-950 border border-neutral-800 rounded-xl p-2.5 sm:p-3">
@@ -1980,6 +2010,34 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBackToCustomer
                         <MessageCircle className="w-4 h-4 text-white stroke-[2.5]" />
                         <span>SHARE VIA WHATSAPP</span>
                       </button>
+                    </div>
+
+                    {/* Immediate Next Purchase Actions without manual clearing */}
+                    <div className="pt-2.5 border-t border-amber-500/20 flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2 text-xs">
+                      <span className="text-[11px] text-neutral-400">
+                        Link saved permanently. Start the next purchase immediately:
+                      </span>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <button
+                          type="button"
+                          onClick={() => handleGenerateCustomerLink(true, latestCustomerLink.customerName, latestCustomerLink.customerId)}
+                          disabled={generatingCustomerLink}
+                          className="px-3 py-1.5 rounded-lg bg-amber-400/20 hover:bg-amber-400/30 border border-amber-400/40 text-amber-300 font-cinzel font-bold text-[11px] uppercase tracking-wider flex items-center gap-1.5 transition-colors cursor-pointer"
+                          title={`Generate next purchase link for ${latestCustomerLink.customerName}`}
+                        >
+                          <Plus className="w-3.5 h-3.5" />
+                          <span>+ Next Purchase for {latestCustomerLink.customerName || 'Same Customer'}</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleStartNextPurchase}
+                          className="px-3 py-1.5 rounded-lg bg-neutral-900 hover:bg-neutral-800 border border-neutral-700 text-neutral-200 hover:text-white font-cinzel font-bold text-[11px] uppercase tracking-wider flex items-center gap-1.5 transition-colors cursor-pointer"
+                          title="Start next purchase for a new customer"
+                        >
+                          <Sparkles className="w-3.5 h-3.5 text-amber-400" />
+                          <span>Start New Customer Purchase</span>
+                        </button>
+                      </div>
                     </div>
                   </div>
                 )}

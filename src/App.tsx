@@ -108,7 +108,15 @@ export default function App() {
 
     const explicitToken = token?.trim() || null;
     const storedToken = typeof localStorage !== 'undefined' ? localStorage.getItem('ssb_customer_token')?.trim() : null;
+    if (explicitToken && explicitToken !== storedToken && typeof localStorage !== 'undefined') {
+      localStorage.setItem('ssb_customer_token', explicitToken);
+    }
     const cleanToken = explicitToken || storedToken || null;
+
+    // Reset access block states on token load
+    setIsForwardedLink(false);
+    setIsReopenedUsedLink(false);
+    setIsRevokedLink(false);
 
     // When customer has no active token or stored session, show the main available box selection page
     if (!cleanToken) {

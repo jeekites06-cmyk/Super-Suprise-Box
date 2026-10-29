@@ -279,6 +279,12 @@ function requireAdminAuth(req: Request, res: Response, next: express.NextFunctio
 // Ensures a customer link can be opened and claimed ONLY by the originally assigned customer.
 // Forwarded recipients or other devices cannot claim or open the box.
 // =========================================================================
+function isBotOrCrawler(req: Request): boolean {
+  const ua = (req.headers['user-agent'] || '').toLowerCase();
+  if (!ua) return false;
+  return /whatsapp|facebookexternalhit|facebot|twitterbot|telegrambot|slackbot|linkedinbot|discordbot|applebot|google-pagerenderer|googlebot|bingbot|crawler|spider|bot/i.test(ua);
+}
+
 function extractClientId(req: Request, res?: Response): string {
   // 1. From custom client header
   const headerId = req.headers['x-customer-client-id'];
@@ -310,14 +316,84 @@ function extractClientId(req: Request, res?: Response): string {
 
 function isSameCustomerDevice(
   boundClientId: string | null | undefined,
-  _boundIp: string | null | undefined,
-  _boundUa: string | null | undefined,
-  req: Request
+  boundIp: string | null | undefined,
+  boundUa: string | null | undefined,
+  req: Request,
+  link?: CustomerLinkRecord
 ): boolean {
   if (!boundClientId) return true; // Not bound to any device yet
 
-  const currentClientId = extractClientId(req);
-  if (currentClientId && currentClientId === boundClientId) {
+  // 1. Collect all client IDs available on the incoming request (header, cookie, body)
+  const headerId = (req.headers['x-customer-client-id'] as string | undefined)?.trim();
+  const bodyId = (req.body && typeof req.body.clientId === 'string') ? req.body.clientId.trim() : undefined;
+  let cookieId: string | undefined;
+  const cookieHeader = req.headers.cookie;
+  if (cookieHeader) {
+    const match = cookieHeader.match(/ssb_cust_id=([^;]+)/);
+    if (match && match[1]) {
+      cookieId = decodeURIComponent(match[1].trim());
+    }
+  }
+
+  const candidateIds = [headerId, cookieId, bodyId].filter(Boolean) as string[];
+
+  // Direct device match
+  if (candidateIds.includes(boundClientId)) {
+    return true;
+  }
+
+  // 2. Multi-Purchase Customer Association check:
+  // If this purchase link belongs to an identified customer,
+  // allow access if the device matches any previously bound link of this same customer,
+  // or if the request carries a valid session/token from this same customer.
+  if (link && (link.customerId || link.customerName)) {
+    const custId = link.customerId || (link.customerName ? link.customerName.toLowerCase().replace(/[^a-z0-9_-]/g, '_') : '');
+    
+    // Check other purchase links of the same customer
+    for (const otherLink of customerLinksMap.values()) {
+      const oCustId = otherLink.customerId || (otherLink.customerName ? otherLink.customerName.toLowerCase().replace(/[^a-z0-9_-]/g, '_') : '');
+      if (oCustId === custId && otherLink.boundClientId) {
+        if (candidateIds.includes(otherLink.boundClientId)) {
+          return true;
+        }
+      }
+    }
+
+    // Check previous token / session cookie for the same customer
+    const prevTokenHeader = (req.headers['x-customer-previous-token'] as string | undefined)?.trim();
+    let sessionCookieToken: string | undefined;
+    if (cookieHeader) {
+      const sessMatch = cookieHeader.match(/ssb_customer_session=([^;]+)/);
+      if (sessMatch && sessMatch[1]) {
+        sessionCookieToken = decodeURIComponent(sessMatch[1].trim());
+      }
+    }
+    const tokenCandidates = [prevTokenHeader, sessionCookieToken].filter(Boolean) as string[];
+    for (const t of tokenCandidates) {
+      const tHash = crypto.createHash('sha256').update(t).digest('hex');
+      const prevLink = customerLinksMap.get(tHash) || Array.from(customerLinksMap.values()).find(l => l.rawToken === t);
+      if (prevLink) {
+        const pCustId = prevLink.customerId || (prevLink.customerName ? prevLink.customerName.toLowerCase().replace(/[^a-z0-9_-]/g, '_') : '');
+        if (pCustId === custId) {
+          return true;
+        }
+      }
+    }
+  }
+
+  // 3. Fallback: match on exact IP and User-Agent if recorded (non-localhost)
+  const currentIp = ((req.headers['x-forwarded-for'] as string) || req.ip || '').trim();
+  const currentUa = (req.headers['user-agent'] || '').trim();
+  if (
+    boundIp &&
+    currentIp &&
+    boundIp === currentIp &&
+    boundUa &&
+    currentUa &&
+    boundUa === currentUa &&
+    currentIp !== '127.0.0.1' &&
+    currentIp !== '::1'
+  ) {
     return true;
   }
 
@@ -2133,7 +2209,7 @@ app.get('/api/customer/session', (req: Request, res: Response): void => {
       if (link.boundClientId) {
         // Link is already activated and bound to the intended customer's device.
         // Check if current device matches the original customer.
-        if (!isSameCustomerDevice(link.boundClientId, link.boundClientIp, link.boundClientUa, req)) {
+        if (!isSameCustomerDevice(link.boundClientId, link.boundClientIp, link.boundClientUa, req, link)) {
           res.status(403).json({
             valid: false,
             forbidden: true,
@@ -2141,40 +2217,54 @@ app.get('/api/customer/session', (req: Request, res: Response): void => {
             error: 'ACCESS RESTRICTED: This customer link is restricted to the originally assigned customer. Forwarded users are not permitted to open or claim this box.',
           });
           return;
+        } else if (!isBotOrCrawler(req)) {
+          // Device verified for this legitimate customer: synchronize client ID if needed
+          const currentId = extractClientId(req, res);
+          if (currentId && link.boundClientId !== currentId) {
+            link.boundClientId = currentId;
+            if (neonPool) {
+              neonPool.query(
+                `UPDATE public.customer_links SET bound_client_id = $1 WHERE token_hash = $2`,
+                [link.boundClientId, link.tokenHash]
+              ).catch(() => {});
+            }
+          }
         }
       } else {
-        // First access by intended customer: ACTIVATE link and bind to customer device!
-        const clientId = extractClientId(req, res);
-        const clientIp = (req.headers['x-forwarded-for'] as string) || req.ip;
-        const clientUa = req.headers['user-agent'] || '';
-        const now = new Date().toISOString();
+        // First access by intended customer: ACTIVATE link and bind to customer device (ignore bots/crawlers)
+        if (!isBotOrCrawler(req)) {
+          const clientId = extractClientId(req, res);
+          const clientIp = (req.headers['x-forwarded-for'] as string) || req.ip;
+          const clientUa = req.headers['user-agent'] || '';
+          const now = new Date().toISOString();
 
-        link.boundClientId = clientId;
-        link.boundClientIp = clientIp;
-        link.boundClientUa = clientUa;
-        link.boundAt = now;
-        link.activatedAt = now;
-        if (link.status === 'UNUSED') {
-          link.status = 'ACTIVATED';
+          link.boundClientId = clientId;
+          link.boundClientIp = clientIp;
+          link.boundClientUa = clientUa;
+          link.boundAt = now;
+          link.activatedAt = now;
+          if (link.status === 'UNUSED') {
+            link.status = 'ACTIVATED';
+          }
+
+          // Establish secure customer session cookies
+          if (!res.headersSent) {
+            res.setHeader('Set-Cookie', [
+              `ssb_cust_id=${encodeURIComponent(clientId)}; Path=/; Max-Age=315360000; SameSite=Lax`,
+              `ssb_customer_session=${encodeURIComponent(link.rawToken)}; Path=/; Max-Age=315360000; SameSite=Lax`,
+            ]);
+          }
+
+          if (neonPool) {
+            neonPool.query(
+              `UPDATE public.customer_links SET status = $1, bound_client_id = $2, bound_client_ip = $3, bound_client_ua = $4, bound_at = $5 WHERE token_hash = $6`,
+              [link.status, link.boundClientId, link.boundClientIp, link.boundClientUa, link.boundAt, link.tokenHash]
+            ).catch((e) => console.error('[DATABASE] Error updating link status in Neon:', e));
+          }
+
+          saveStoreToDisk();
+          console.log(`[CUSTOMER ACTIVATION] Customer link ${link.tokenPrefix} activated and bound to device ${clientId}`);
         }
-
-        // Establish secure customer session cookies
-        if (!res.headersSent) {
-          res.setHeader('Set-Cookie', [
-            `ssb_cust_id=${encodeURIComponent(clientId)}; Path=/; Max-Age=315360000; SameSite=Lax`,
-            `ssb_customer_session=${encodeURIComponent(link.rawToken)}; Path=/; Max-Age=315360000; SameSite=Lax`,
-          ]);
-        }
-
-        if (neonPool) {
-          neonPool.query(
-            `UPDATE public.customer_links SET status = $1, bound_client_id = $2, bound_client_ip = $3, bound_client_ua = $4, bound_at = $5 WHERE token_hash = $6`,
-            [link.status, link.boundClientId, link.boundClientIp, link.boundClientUa, link.boundAt, link.tokenHash]
-          ).catch((e) => console.error('[DATABASE] Error updating link status in Neon:', e));
-        }
-
-        saveStoreToDisk();
-        console.log(`[CUSTOMER ACTIVATION] Customer link ${link.tokenPrefix} activated and bound to device ${clientId}`);
       }
     }
 
@@ -2354,7 +2444,7 @@ app.post('/api/boxes/claim', async (req: Request, res: Response): Promise<void> 
     const isAdmin = isValidAdminToken(req.headers.authorization?.replace('Bearer ', '').trim());
 
     if (link && !isAdmin) {
-      if (link.boundClientId && !isSameCustomerDevice(link.boundClientId, link.boundClientIp, link.boundClientUa, req)) {
+      if (link.boundClientId && !isSameCustomerDevice(link.boundClientId, link.boundClientIp, link.boundClientUa, req, link)) {
         res.status(403).json({
           error: 'ACCESS RESTRICTED: This customer link is restricted to the originally assigned customer. Forwarded users are not permitted to claim.',
           isForwardedLink: true,
@@ -2376,7 +2466,7 @@ app.post('/api/boxes/claim', async (req: Request, res: Response): Promise<void> 
       }
     }
 
-    if (customer && !isAdmin) {
+    if (customer && !link && !isAdmin) {
       if (customer.boundClientId && !isSameCustomerDevice(customer.boundClientId, customer.boundClientIp, customer.boundClientUa, req)) {
         res.status(403).json({
           error: 'ACCESS RESTRICTED: This customer session is restricted to the originally assigned customer. Forwarded users are not permitted to claim.',
@@ -2593,7 +2683,7 @@ app.post('/api/customer/open', async (req: Request, res: Response): Promise<void
       // Ensure that a customer link shared from the Admin Portal can only be opened by the originally assigned customer.
       const isAdmin = isValidAdminToken(req.headers.authorization?.replace('Bearer ', '').trim());
       if (!isAdmin) {
-        if (link.boundClientId && !isSameCustomerDevice(link.boundClientId, link.boundClientIp, link.boundClientUa, req)) {
+        if (link.boundClientId && !isSameCustomerDevice(link.boundClientId, link.boundClientIp, link.boundClientUa, req, link)) {
           res.status(403).json({
             error: 'ACCESS RESTRICTED: This customer link can only be opened by the originally assigned customer. Forwarded users are not permitted to open this box.',
             isForwardedLink: true,
@@ -2705,6 +2795,15 @@ app.post('/api/customer/open', async (req: Request, res: Response): Promise<void
             [tokenHash, now, result, prizeName, claimCode, assignedBoxSerial]
           );
 
+          // Update customer record in public.customers
+          await client.query(
+            `UPDATE public.customers
+             SET opened = TRUE, used = TRUE, opened_at = $1, result = $2,
+                 prize_name = $3, claim_code = $4, updated_at = NOW()
+             WHERE token = $5 OR token = $6`,
+            [now, result, prizeName, claimCode, cleanToken, tokenHash]
+          );
+
           await client.query('COMMIT');
         } catch (dbErr) {
           await client.query('ROLLBACK');
@@ -2718,6 +2817,16 @@ app.post('/api/customer/open', async (req: Request, res: Response): Promise<void
       // Update in-memory state
       link.status = 'USED';
       link.usedAt = now;
+
+      const cust = storeData.customers[cleanToken] || storeData.customers[link.rawToken];
+      if (cust) {
+        cust.opened = true;
+        cust.used = true;
+        cust.openedAt = now;
+        cust.result = result;
+        cust.prizeName = prizeName || undefined;
+        cust.claimCode = claimCode || undefined;
+      }
 
       if (existingBox) {
         existingBox.status = 'OPENED';
