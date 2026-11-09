@@ -64,6 +64,7 @@ export const AvailableBoxGrid: React.FC<AvailableBoxGridProps> = ({
   const [totalFilteredCount, setTotalFilteredCount] = useState<number>(15051);
   const [openedCount, setOpenedCount] = useState<number>(0);
   const [claimedCount, setClaimedCount] = useState<number>(0);
+  const [purchasesCompleted, setPurchasesCompleted] = useState<number>(0);
   const [reservedCount, setReservedCount] = useState<number>(0);
   const [reservedWinningCount, setReservedWinningCount] = useState<number>(0);
   const [hiddenCount, setHiddenCount] = useState<number>(0);
@@ -134,6 +135,7 @@ export const AvailableBoxGrid: React.FC<AvailableBoxGridProps> = ({
             setCurrentPage(data.page);
             if (data.openedCount !== undefined) setOpenedCount(data.openedCount);
             if (data.claimedCount !== undefined) setClaimedCount(data.claimedCount);
+            if (data.purchasesCompleted !== undefined) setPurchasesCompleted(data.purchasesCompleted);
             if (data.reservedCount !== undefined) setReservedCount(data.reservedCount);
             if (data.reservedWinningCount !== undefined) setReservedWinningCount(data.reservedWinningCount);
             if (data.hiddenCount !== undefined) setHiddenCount(data.hiddenCount);
@@ -232,9 +234,17 @@ export const AvailableBoxGrid: React.FC<AvailableBoxGridProps> = ({
       if (!res.ok) {
         setClaimError(data.error || 'Failed to claim box. Please choose another.');
         setClaimingSerial(null);
-        fetchAvailableBoxes(currentPage, searchQuery, activeRange);
         return;
       }
+
+      // Dynamically remove claimed box immediately upon confirmation
+      setBoxes((prev) => prev.filter((b) => b.serial !== serial));
+      setTotalAvailable((prev) => Math.max(0, prev - 1));
+      setTotalFilteredCount((prev) => Math.max(0, prev - 1));
+      setClaimedCount((prev) => prev + 1);
+
+      // Background sync to update pagination and pull next available box onto page
+      fetchAvailableBoxes(currentPage, searchQuery, activeRange, statusFilter, true);
 
       onBoxClaimed(serial, data.token || token);
     } catch (err: unknown) {
@@ -353,7 +363,7 @@ export const AvailableBoxGrid: React.FC<AvailableBoxGridProps> = ({
           </div>
         </div>
 
-        {/* Card 3: WINNING PRIZES (STATISTICS DISPLAY & SHOWCASE TOGGLE) */}
+        {/* Card 3: PURCHASES COMPLETED */}
         <div
           onClick={() => setShowPrizesSection((prev) => !prev)}
           className="bg-[#0c0c11]/95 border border-amber-500/40 hover:border-amber-400/80 rounded-2xl p-4 sm:p-5 flex items-center gap-4 transition-all duration-300 shadow-[0_10px_25px_rgba(0,0,0,0.7)] backdrop-blur-sm group min-h-[96px] h-full cursor-pointer"
@@ -364,16 +374,11 @@ export const AvailableBoxGrid: React.FC<AvailableBoxGridProps> = ({
           </div>
           <div className="flex-1 min-w-0">
             <span className="text-[11px] font-cinzel font-semibold tracking-wider text-amber-400/90 uppercase block truncate">
-              WINNING PRIZES
+              PURCHASES COMPLETED
             </span>
-            <div className="flex items-baseline gap-1.5 flex-wrap">
-              <span className="text-2xl sm:text-3xl font-extrabold font-mono-numbers text-amber-300 tracking-tight">
-                {publicPrizes.length}
-              </span>
-              <span className="text-[11px] text-neutral-400 font-medium whitespace-nowrap">
-                Active Cards
-              </span>
-            </div>
+            <span className="text-2xl sm:text-3xl font-extrabold font-mono-numbers text-amber-300 tracking-tight block">
+              {purchasesCompleted.toLocaleString()}
+            </span>
           </div>
         </div>
 
@@ -726,11 +731,11 @@ export const AvailableBoxGrid: React.FC<AvailableBoxGridProps> = ({
         </div>
       ) : (
         <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 xl:grid-cols-10 2xl:grid-cols-12 gap-1.5 sm:gap-2">
-          {boxes.map((box) => {
+          {boxes
+            .filter((box) => box.status !== 'CLAIMED' && box.status !== 'OPENED')
+            .map((box) => {
             const isBeingClaimed = claimingSerial === box.serial;
             const isAvailable = !box.status || box.status === 'AVAILABLE';
-            const isClaimed = box.status === 'CLAIMED';
-            const isOpened = box.status === 'OPENED';
 
             return (
               <div
@@ -738,9 +743,7 @@ export const AvailableBoxGrid: React.FC<AvailableBoxGridProps> = ({
                 className={`bg-neutral-950/80 border rounded-xl p-1 sm:p-1.5 flex flex-col items-center justify-between transition-all duration-200 shadow-sm ${
                   isAvailable
                     ? 'border-neutral-800/90 hover:border-amber-400/60 hover:bg-neutral-900/90 hover:shadow-amber-500/10 group cursor-pointer'
-                    : isOpened
-                    ? 'border-neutral-800/40 bg-neutral-950/40 opacity-70'
-                    : 'border-neutral-800/40 bg-neutral-950/40 opacity-75'
+                    : 'border-neutral-800/40 bg-neutral-950/40 opacity-70'
                 }`}
               >
                 {/* Scaled-down 3D Surprise Box */}
@@ -775,13 +778,9 @@ export const AvailableBoxGrid: React.FC<AvailableBoxGridProps> = ({
                       <span>CHOOSE BOX</span>
                     )}
                   </button>
-                ) : isOpened ? (
+                ) : (
                   <div className="w-full py-1 px-1 rounded bg-neutral-900 border border-neutral-800 text-neutral-400 font-cinzel font-semibold text-[8px] sm:text-[9px] uppercase tracking-wider flex items-center justify-center select-none">
                     <span>OPENED</span>
-                  </div>
-                ) : (
-                  <div className="w-full py-1 px-1 rounded bg-neutral-900/90 border border-neutral-800 text-amber-500/80 font-cinzel font-semibold text-[8px] sm:text-[9px] uppercase tracking-wider flex items-center justify-center select-none">
-                    <span>CLAIMED</span>
                   </div>
                 )}
               </div>

@@ -841,10 +841,15 @@ const handleGetPublicBoxes = (req: Request, res: Response): void => {
       boxStatus = 'AVAILABLE';
     }
 
-    // Optional status filter ('all' shows the entire inventory of 15,051 boxes; 'available' shows all eligible available boxes)
+    // CUSTOMER-FACING BOX GRID REQUIREMENT:
+    // Hide all boxes whose status is either CLAIMED or OPENED.
+    // Only AVAILABLE boxes should be displayed to customers.
+    if (boxStatus === 'CLAIMED' || boxStatus === 'OPENED') {
+      continue;
+    }
+
+    // Optional status filter ('all' shows the visible available inventory; 'available' shows eligible available boxes)
     if (statusFilter === 'available' && boxStatus !== 'AVAILABLE') continue;
-    if (statusFilter === 'claimed' && boxStatus !== 'CLAIMED') continue;
-    if (statusFilter === 'opened' && boxStatus !== 'OPENED') continue;
 
     // Optional range filter
     if (rangeStart !== undefined && box.id < rangeStart) continue;
@@ -880,6 +885,14 @@ const handleGetPublicBoxes = (req: Request, res: Response): void => {
   const startIndex = (page - 1) * limit;
   const pagedBoxes = allItems.slice(startIndex, startIndex + limit);
 
+  // Authoritative count of successfully completed customer purchases from database
+  let completedPurchasesCount = 0;
+  for (const link of customerLinksMap.values()) {
+    if (link.status !== 'REVOKED') {
+      completedPurchasesCount++;
+    }
+  }
+
   res.json({
     boxes: pagedBoxes,
     totalInventory: globalTotalCount,
@@ -893,6 +906,7 @@ const handleGetPublicBoxes = (req: Request, res: Response): void => {
     totalBatchBoxes: globalTotalCount,
     openedCount: globalOpenedCount,
     claimedCount: globalClaimedCount,
+    purchasesCompleted: completedPurchasesCount,
     reservedCount: globalReservedCount,
     reservedWinningCount: globalReservedCount,
     hiddenCount: globalHiddenCount,

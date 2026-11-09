@@ -18,6 +18,7 @@ export interface AvailableBoxesResponse {
   totalBatchBoxes: number;
   openedCount?: number;
   claimedCount?: number;
+  purchasesCompleted?: number;
   reservedCount?: number;
   reservedWinningCount?: number;
   totalUnavailable?: number;
