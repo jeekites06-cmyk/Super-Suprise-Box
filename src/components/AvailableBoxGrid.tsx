@@ -1,15 +1,12 @@
-import React, { useState, useEffect, useCallback, useTransition, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useTransition, useRef, useMemo } from 'react';
 import { SurpriseBox3D } from './SurpriseBox3D';
 import { AvailableBox, AvailableBoxesResponse, PublicPrize } from '../types/box';
 import { getOrCreateCustomerClientId } from '../utils/customerStore';
 import {
   Search,
   RefreshCw,
-  ChevronLeft,
-  ChevronRight,
   Sparkles,
   AlertCircle,
-  Gift,
   Package,
   Trophy,
   Users,
@@ -23,9 +20,18 @@ interface AvailableBoxGridProps {
   onBoxClaimed: (serial: string, newToken?: string) => void;
 }
 
-const BOXES_PER_PAGE = 300;
+const BOXES_PER_PAGE = 25000;
 
-function generateFallbackPage(page: number, limit = 300, search = '', range = 'all', _status = 'all'): AvailableBox[] {
+function getVirtualGridConfig(width: number) {
+  if (width >= 1536) return { cols: 12, cardH: 142, gap: 8, rowH: 150 };
+  if (width >= 1280) return { cols: 10, cardH: 142, gap: 8, rowH: 150 };
+  if (width >= 1024) return { cols: 8, cardH: 142, gap: 8, rowH: 150 };
+  if (width >= 768) return { cols: 6, cardH: 142, gap: 8, rowH: 150 };
+  if (width >= 640) return { cols: 4, cardH: 136, gap: 8, rowH: 144 };
+  return { cols: 3, cardH: 124, gap: 6, rowH: 130 };
+}
+
+function generateFallbackPage(page: number, limit = 25000, search = '', range = 'all', _status = 'all'): AvailableBox[] {
   const items: AvailableBox[] = [];
   let rStart = 1;
   let rEnd = 15051;
@@ -61,16 +67,16 @@ export const AvailableBoxGrid: React.FC<AvailableBoxGridProps> = ({
   const [boxes, setBoxes] = useState<AvailableBox[]>([]);
   const [totalInventory, setTotalInventory] = useState<number>(15051);
   const [totalAvailable, setTotalAvailable] = useState<number>(15051);
-  const [totalFilteredCount, setTotalFilteredCount] = useState<number>(15051);
+  const [, setTotalFilteredCount] = useState<number>(15051);
   const [openedCount, setOpenedCount] = useState<number>(0);
   const [claimedCount, setClaimedCount] = useState<number>(0);
   const [purchasesCompleted, setPurchasesCompleted] = useState<number>(0);
-  const [reservedCount, setReservedCount] = useState<number>(0);
-  const [reservedWinningCount, setReservedWinningCount] = useState<number>(0);
-  const [hiddenCount, setHiddenCount] = useState<number>(0);
-  const [totalUnavailableCount, setTotalUnavailableCount] = useState<number>(0);
+  const [, setReservedCount] = useState<number>(0);
+  const [, setReservedWinningCount] = useState<number>(0);
+  const [, setHiddenCount] = useState<number>(0);
+  const [, setTotalUnavailableCount] = useState<number>(0);
   const [currentPage, setCurrentPage] = useState<number>(1);
-  const [totalPages, setTotalPages] = useState<number>(51);
+  const [, setTotalPages] = useState<number>(1);
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [activeRange, setActiveRange] = useState<string>('all');
   const [statusFilter, setStatusFilter] = useState<'all' | 'available'>('all');
@@ -82,9 +88,88 @@ export const AvailableBoxGrid: React.FC<AvailableBoxGridProps> = ({
   const [claimingSerial, setClaimingSerial] = useState<string | null>(null);
   const [claimError, setClaimError] = useState<string | null>(null);
   const [dbError, setDbError] = useState<string | null>(null);
-  const [jumpPageInput, setJumpPageInput] = useState<string>('');
   const [, startTransition] = useTransition();
   const inFlightAbortRef = useRef<AbortController | null>(null);
+
+  // Virtual scrolling states
+  const [windowWidth, setWindowWidth] = useState<number>(
+    typeof window !== 'undefined' ? window.innerWidth : 1200
+  );
+  const [visibleRange, setVisibleRange] = useState<{ startRow: number; endRow: number }>({
+    startRow: 0,
+    endRow: 20,
+  });
+
+  const gridRef = useRef<HTMLDivElement>(null);
+  const rafIdRef = useRef<number | null>(null);
+
+  // Filter out any CLAIMED or OPENED boxes so only AVAILABLE boxes are shown
+  const availableBoxes = useMemo(() => {
+    return boxes.filter((box) => box.status !== 'CLAIMED' && box.status !== 'OPENED');
+  }, [boxes]);
+
+  const config = getVirtualGridConfig(windowWidth);
+  const totalItems = availableBoxes.length;
+  const totalRows = Math.ceil(totalItems / config.cols);
+  const totalHeight = totalRows * config.rowH;
+
+  const updateVirtualWindow = useCallback(() => {
+    if (!gridRef.current) return;
+    const rect = gridRef.current.getBoundingClientRect();
+    const vHeight = window.innerHeight;
+    const wWidth = window.innerWidth;
+    const currentConfig = getVirtualGridConfig(wWidth);
+
+    const currentTotalRows = Math.ceil(availableBoxes.length / currentConfig.cols);
+
+    // Scrolled distance into the grid container
+    const offset = Math.max(0, -rect.top);
+
+    // Viewport buffers: 4 rows above, 6 rows below
+    const bufferAbovePx = 4 * currentConfig.rowH;
+    const bufferBelowPx = 6 * currentConfig.rowH;
+
+    const newStartRow = Math.max(0, Math.floor((offset - bufferAbovePx) / currentConfig.rowH));
+    const newEndRow = Math.min(
+      currentTotalRows,
+      Math.ceil((offset + vHeight + bufferBelowPx) / currentConfig.rowH)
+    );
+
+    setWindowWidth(wWidth);
+    setVisibleRange((prev) => {
+      if (prev.startRow === newStartRow && prev.endRow === newEndRow) {
+        return prev;
+      }
+      return { startRow: newStartRow, endRow: newEndRow };
+    });
+  }, [availableBoxes.length]);
+
+  useEffect(() => {
+    const onScrollOrResize = () => {
+      if (rafIdRef.current !== null) return;
+      rafIdRef.current = requestAnimationFrame(() => {
+        rafIdRef.current = null;
+        updateVirtualWindow();
+      });
+    };
+
+    window.addEventListener('scroll', onScrollOrResize, { passive: true });
+    window.addEventListener('resize', onScrollOrResize, { passive: true });
+
+    updateVirtualWindow();
+
+    return () => {
+      if (rafIdRef.current !== null) {
+        cancelAnimationFrame(rafIdRef.current);
+      }
+      window.removeEventListener('scroll', onScrollOrResize);
+      window.removeEventListener('resize', onScrollOrResize);
+    };
+  }, [updateVirtualWindow]);
+
+  useEffect(() => {
+    updateVirtualWindow();
+  }, [availableBoxes.length, updateVirtualWindow]);
 
   const fetchAvailableBoxes = useCallback(
     async (page = 1, search = '', range = 'all', status = 'all', isSilentSync = false) => {
@@ -158,7 +243,6 @@ export const AvailableBoxGrid: React.FC<AvailableBoxGridProps> = ({
         }
       }
 
-      // If all retries failed, gracefully preserve existing view or use generated page
       console.warn('Network sync notice, preserving client inventory view:', lastErr);
       setBoxes((prev) => {
         if (prev && prev.length > 0) return prev;
@@ -243,7 +327,7 @@ export const AvailableBoxGrid: React.FC<AvailableBoxGridProps> = ({
       setTotalFilteredCount((prev) => Math.max(0, prev - 1));
       setClaimedCount((prev) => prev + 1);
 
-      // Background sync to update pagination and pull next available box onto page
+      // Background sync to update availability
       fetchAvailableBoxes(currentPage, searchQuery, activeRange, statusFilter, true);
 
       onBoxClaimed(serial, data.token || token);
@@ -254,50 +338,6 @@ export const AvailableBoxGrid: React.FC<AvailableBoxGridProps> = ({
     }
   };
 
-  const handlePageChange = (newPage: number) => {
-    const target = Math.max(1, Math.min(totalPages, newPage));
-    setCurrentPage(target);
-    window.scrollTo({ top: 120, behavior: 'smooth' });
-  };
-
-  const handleJumpSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    const p = parseInt(jumpPageInput, 10);
-    if (!isNaN(p) && p >= 1 && p <= totalPages) {
-      handlePageChange(p);
-      setJumpPageInput('');
-    }
-  };
-
-  // Generate numbered pagination buttons
-  const getPageNumbers = () => {
-    const pages: (number | string)[] = [];
-    const maxButtons = 5;
-
-    if (totalPages <= maxButtons + 2) {
-      for (let i = 1; i <= totalPages; i++) pages.push(i);
-    } else {
-      pages.push(1);
-      let start = Math.max(2, currentPage - 1);
-      let end = Math.min(totalPages - 1, currentPage + 1);
-
-      if (currentPage <= 3) {
-        start = 2;
-        end = 4;
-      } else if (currentPage >= totalPages - 2) {
-        start = totalPages - 3;
-        end = totalPages - 1;
-      }
-
-      if (start > 2) pages.push('...');
-      for (let i = start; i <= end; i++) pages.push(i);
-      if (end < totalPages - 1) pages.push('...');
-      pages.push(totalPages);
-    }
-    return pages;
-  };
-
-
   const filteredPublicPrizes = publicPrizes.filter((p) => {
     if (!prizeSearch.trim()) return true;
     const query = prizeSearch.trim().toUpperCase();
@@ -307,6 +347,11 @@ export const AvailableBoxGrid: React.FC<AvailableBoxGridProps> = ({
       (p.customNote && p.customNote.toUpperCase().includes(query))
     );
   });
+
+  const startIndex = Math.min(totalItems, visibleRange.startRow * config.cols);
+  const endIndex = Math.min(totalItems, visibleRange.endRow * config.cols);
+  const visibleBoxes = availableBoxes.slice(startIndex, endIndex);
+  const offsetY = visibleRange.startRow * config.rowH;
 
   return (
     <div className="w-full flex flex-col gap-4 sm:gap-6 overflow-x-hidden">
@@ -319,11 +364,13 @@ export const AvailableBoxGrid: React.FC<AvailableBoxGridProps> = ({
         <div className="absolute top-0 left-1/4 w-96 h-96 bg-amber-500/10 rounded-full blur-3xl pointer-events-none" />
         <div className="absolute top-0 right-1/4 w-96 h-96 bg-yellow-500/10 rounded-full blur-3xl pointer-events-none" />
 
-        {/* Hero Banner Visual: Fully Visible, Responsive Across All Screens */}
+        {/* Hero Banner Visual: Fully Visible, Responsive, Lazy-Loaded */}
         <div className="w-full relative select-none">
           <img
             src="/assets/hero-banner-art.png"
             alt="Super Surprise Box promotion featuring stylish women, glowing mystery gift box, iPhones, and cash prizes"
+            loading="lazy"
+            decoding="async"
             className="w-full h-auto min-h-[170px] sm:min-h-[220px] md:min-h-[280px] lg:min-h-[320px] max-h-[460px] object-cover object-center block"
           />
         </div>
@@ -398,7 +445,7 @@ export const AvailableBoxGrid: React.FC<AvailableBoxGridProps> = ({
         </div>
       </div>
 
-      {/* Caption below the hero: “🎁 YOUR SURPRISE. YOUR MOMENT. YOUR REWARD. ✨” */}
+      {/* Caption below the hero */}
       <div className="text-center py-1 select-none">
         <p className="text-xs sm:text-sm font-cinzel font-bold tracking-widest text-transparent bg-clip-text bg-gradient-to-r from-amber-200 via-yellow-400 to-amber-200 uppercase drop-shadow-[0_2px_10px_rgba(245,158,11,0.2)]">
           🎁 YOUR SURPRISE. YOUR MOMENT. YOUR REWARD. ✨
@@ -625,80 +672,24 @@ export const AvailableBoxGrid: React.FC<AvailableBoxGridProps> = ({
         </div>
       </div>
 
-      {/* TOP PAGINATION CONTROLS BAR */}
-      <div className="flex flex-col sm:flex-row items-center justify-between gap-2.5 bg-[#0a0a0e] border border-neutral-800/80 px-3.5 py-2 rounded-xl text-xs">
+      {/* AVAILABLE BOXES INVENTORY BAR (SINGLE PAGE) */}
+      <div className="flex flex-col sm:flex-row items-center justify-between gap-2.5 bg-[#0a0a0e] border border-neutral-800/80 px-3.5 py-2.5 rounded-xl text-xs">
         <div className="text-neutral-400 font-mono-numbers flex items-center gap-2">
           <span>
-            Page <strong className="text-white">{currentPage}</strong> of <strong className="text-white">{totalPages}</strong>
+            Showing All <strong className="text-emerald-400 font-bold">{availableBoxes.length.toLocaleString()}</strong> Available Boxes
           </span>
           <span className="text-neutral-600">·</span>
-          <span className="text-amber-400/90 font-medium">{boxes.length} boxes on page</span>
+          <span className="text-amber-400/90 font-medium">Single Page Grid</span>
         </div>
-
-        {/* Page Nav Buttons */}
-        <div className="flex items-center gap-1.5">
-          <button
-            disabled={currentPage <= 1 || loading}
-            onClick={() => handlePageChange(currentPage - 1)}
-            className="px-2.5 py-1 rounded-lg bg-neutral-900 border border-neutral-800 text-neutral-300 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed flex items-center gap-1"
-          >
-            <ChevronLeft className="w-3.5 h-3.5" />
-            <span>Prev</span>
-          </button>
-
-          {/* Numbered Page Buttons */}
-          <div className="hidden md:flex items-center gap-1">
-            {getPageNumbers().map((p, idx) =>
-              p === '...' ? (
-                <span key={`dots-${idx}`} className="px-1 text-neutral-600">
-                  ...
-                </span>
-              ) : (
-                <button
-                  key={p}
-                  onClick={() => handlePageChange(Number(p))}
-                  className={`w-6.5 h-6.5 rounded-md font-mono-numbers text-xs font-semibold transition-colors ${
-                    currentPage === p
-                      ? 'bg-amber-400 text-black shadow-sm'
-                      : 'bg-neutral-900 text-neutral-400 hover:text-white'
-                  }`}
-                >
-                  {p}
-                </button>
-              )
-            )}
-          </div>
-
-          <button
-            disabled={currentPage >= totalPages || loading}
-            onClick={() => handlePageChange(currentPage + 1)}
-            className="px-2.5 py-1 rounded-lg bg-neutral-900 border border-neutral-800 text-neutral-300 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed flex items-center gap-1"
-          >
-            <span>Next</span>
-            <ChevronRight className="w-3.5 h-3.5" />
-          </button>
-
-          {/* Jump to page form */}
-          <form onSubmit={handleJumpSubmit} className="hidden sm:flex items-center gap-1 ml-1.5">
-            <input
-              type="text"
-              placeholder="Page #"
-              value={jumpPageInput}
-              onChange={(e) => setJumpPageInput(e.target.value.replace(/\D/g, ''))}
-              className="w-14 px-1.5 py-1 bg-neutral-900 border border-neutral-700 rounded-md text-xs text-white placeholder-neutral-600 font-mono-numbers text-center focus:outline-none focus:border-amber-400"
-            />
-            <button
-              type="submit"
-              className="px-2 py-1 bg-neutral-800 hover:bg-neutral-700 text-neutral-200 text-xs rounded-md"
-            >
-              Go
-            </button>
-          </form>
+        <div className="text-neutral-400 font-mono-numbers text-[11px]">
+          Total Available: <strong className="text-white font-bold">{totalAvailable.toLocaleString()}</strong> of {totalInventory.toLocaleString()}
         </div>
       </div>
 
-      {/* --- COMPACT RESPONSIVE 300-BOX GRID --- */}
-      {dbError && boxes.length === 0 ? (
+      {/* =========================================================================
+          4. VIRTUALIZED COMPACT RESPONSIVE BOX GRID
+         ========================================================================= */}
+      {dbError && availableBoxes.length === 0 ? (
         <div className="py-16 text-center bg-red-950/20 border border-red-500/40 rounded-2xl p-6 max-w-lg mx-auto space-y-3">
           <AlertCircle className="w-8 h-8 text-red-400 mx-auto" />
           <h3 className="text-sm font-bold text-red-200 uppercase font-cinzel">Database Connection Error</h3>
@@ -710,12 +701,12 @@ export const AvailableBoxGrid: React.FC<AvailableBoxGridProps> = ({
             Retry Loading Inventory
           </button>
         </div>
-      ) : loading && boxes.length === 0 ? (
+      ) : loading && availableBoxes.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-24 gap-3">
           <div className="w-8 h-8 border-2 border-amber-400 border-t-transparent rounded-full animate-spin" />
-          <span className="text-xs text-neutral-400 font-cinzel">Loading 300 Surprise Boxes...</span>
+          <span className="text-xs text-neutral-400 font-cinzel">Loading Available Surprise Boxes...</span>
         </div>
-      ) : boxes.length === 0 ? (
+      ) : availableBoxes.length === 0 ? (
         <div className="py-16 text-center bg-neutral-950/40 border border-neutral-800 rounded-2xl p-6">
           <p className="text-sm text-neutral-300 mb-2">No available boxes match your search.</p>
           <button
@@ -730,113 +721,74 @@ export const AvailableBoxGrid: React.FC<AvailableBoxGridProps> = ({
           </button>
         </div>
       ) : (
-        <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 xl:grid-cols-10 2xl:grid-cols-12 gap-1.5 sm:gap-2">
-          {boxes
-            .filter((box) => box.status !== 'CLAIMED' && box.status !== 'OPENED')
-            .map((box) => {
-            const isBeingClaimed = claimingSerial === box.serial;
-            const isAvailable = !box.status || box.status === 'AVAILABLE';
+        <div
+          ref={gridRef}
+          className="relative w-full"
+          style={{ height: `${totalHeight}px` }}
+        >
+          <div
+            style={{
+              transform: `translate3d(0, ${offsetY}px, 0)`,
+              gridTemplateColumns: `repeat(${config.cols}, minmax(0, 1fr))`,
+              rowGap: `${config.gap}px`,
+              columnGap: `${config.gap}px`,
+            }}
+            className="grid w-full"
+          >
+            {visibleBoxes.map((box) => {
+              const isBeingClaimed = claimingSerial === box.serial;
+              const isAvailable = !box.status || box.status === 'AVAILABLE';
 
-            return (
-              <div
-                key={box.serial}
-                className={`bg-neutral-950/80 border rounded-xl p-1 sm:p-1.5 flex flex-col items-center justify-between transition-all duration-200 shadow-sm ${
-                  isAvailable
-                    ? 'border-neutral-800/90 hover:border-amber-400/60 hover:bg-neutral-900/90 hover:shadow-amber-500/10 group cursor-pointer'
-                    : 'border-neutral-800/40 bg-neutral-950/40 opacity-70'
-                }`}
-              >
-                {/* Scaled-down 3D Surprise Box */}
-                <div className="w-full flex justify-center py-0.5">
-                  <SurpriseBox3D
-                    serial={box.serial}
-                    size="sm"
-                    disabled={!isAvailable || isBeingClaimed}
-                    onClick={() => isAvailable && handleSelectBox(box.serial)}
-                  />
-                </div>
-
-                {/* Readable Serial Number */}
-                <span
-                  className={`text-[9.5px] sm:text-[10.5px] font-mono-numbers font-bold tracking-wider my-0.5 ${
-                    isAvailable ? 'text-amber-300 group-hover:text-amber-200' : 'text-neutral-500'
+              return (
+                <div
+                  key={box.serial}
+                  className={`bg-neutral-950/80 border rounded-xl p-1 sm:p-1.5 flex flex-col items-center justify-between transition-all duration-200 shadow-sm ${
+                    isAvailable
+                      ? 'border-neutral-800/90 hover:border-amber-400/60 hover:bg-neutral-900/90 hover:shadow-amber-500/10 group cursor-pointer'
+                      : 'border-neutral-800/40 bg-neutral-950/40 opacity-70'
                   }`}
+                  style={{ height: `${config.cardH}px` }}
                 >
-                  {box.serial}
-                </span>
-
-                {/* Status-Aware Action Button */}
-                {isAvailable ? (
-                  <button
-                    onClick={() => handleSelectBox(box.serial)}
-                    disabled={isBeingClaimed}
-                    className="w-full py-1 px-1 rounded bg-gradient-to-r from-amber-400 via-amber-300 to-[#d4af37] hover:from-amber-300 hover:to-amber-400 text-black font-cinzel font-bold text-[8.5px] sm:text-[9.5px] uppercase tracking-wider transition-all shadow-sm hover:shadow-amber-500/30 flex items-center justify-center whitespace-nowrap active:scale-95 cursor-pointer"
-                  >
-                    {isBeingClaimed ? (
-                      <div className="w-2.5 h-2.5 border-2 border-black border-t-transparent rounded-full animate-spin" />
-                    ) : (
-                      <span>CHOOSE BOX</span>
-                    )}
-                  </button>
-                ) : (
-                  <div className="w-full py-1 px-1 rounded bg-neutral-900 border border-neutral-800 text-neutral-400 font-cinzel font-semibold text-[8px] sm:text-[9px] uppercase tracking-wider flex items-center justify-center select-none">
-                    <span>OPENED</span>
+                  {/* Scaled-down 3D Surprise Box */}
+                  <div className="w-full flex justify-center py-0.5">
+                    <SurpriseBox3D
+                      serial={box.serial}
+                      size="sm"
+                      disabled={!isAvailable || isBeingClaimed}
+                      onClick={() => isAvailable && handleSelectBox(box.serial)}
+                    />
                   </div>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      )}
 
-      {/* BOTTOM PAGINATION CONTROLS */}
-      {totalPages > 1 && (
-        <div className="flex flex-col sm:flex-row items-center justify-between gap-2.5 bg-[#0a0a0e] border border-neutral-800/80 px-3.5 py-2.5 rounded-xl text-xs mt-1.5">
-          <div className="text-neutral-400 font-mono-numbers">
-            Page {currentPage} of {totalPages} · Showing {boxes.length} boxes on page ({totalFilteredCount.toLocaleString()} total in current filter)
-          </div>
-
-          <div className="flex items-center gap-1.5">
-            <button
-              disabled={currentPage <= 1 || loading}
-              onClick={() => handlePageChange(currentPage - 1)}
-              className="px-2.5 py-1 rounded-lg bg-neutral-900 border border-neutral-800 text-neutral-300 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed flex items-center gap-1"
-            >
-              <ChevronLeft className="w-3.5 h-3.5" />
-              <span>Previous</span>
-            </button>
-
-            {/* Numbered Page Buttons for bottom */}
-            <div className="hidden md:flex items-center gap-1">
-              {getPageNumbers().map((p, idx) =>
-                p === '...' ? (
-                  <span key={`dots-b-${idx}`} className="px-1 text-neutral-600">
-                    ...
-                  </span>
-                ) : (
-                  <button
-                    key={`b-${p}`}
-                    onClick={() => handlePageChange(Number(p))}
-                    className={`w-6.5 h-6.5 rounded-md font-mono-numbers text-xs font-semibold transition-colors ${
-                      currentPage === p
-                        ? 'bg-amber-400 text-black shadow-sm'
-                        : 'bg-neutral-900 text-neutral-400 hover:text-white'
+                  {/* Readable Serial Number */}
+                  <span
+                    className={`text-[9.5px] sm:text-[10.5px] font-mono-numbers font-bold tracking-wider my-0.5 ${
+                      isAvailable ? 'text-amber-300 group-hover:text-amber-200' : 'text-neutral-500'
                     }`}
                   >
-                    {p}
-                  </button>
-                )
-              )}
-            </div>
+                    {box.serial}
+                  </span>
 
-            <button
-              disabled={currentPage >= totalPages || loading}
-              onClick={() => handlePageChange(currentPage + 1)}
-              className="px-2.5 py-1 rounded-lg bg-neutral-900 border border-neutral-800 text-neutral-300 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed flex items-center gap-1"
-            >
-              <span>Next</span>
-              <ChevronRight className="w-3.5 h-3.5" />
-            </button>
+                  {/* Status-Aware Action Button */}
+                  {isAvailable ? (
+                    <button
+                      onClick={() => handleSelectBox(box.serial)}
+                      disabled={isBeingClaimed}
+                      className="w-full py-1 px-1 rounded bg-gradient-to-r from-amber-400 via-amber-300 to-[#d4af37] hover:from-amber-300 hover:to-amber-400 text-black font-cinzel font-bold text-[8.5px] sm:text-[9.5px] uppercase tracking-wider transition-all shadow-sm hover:shadow-amber-500/30 flex items-center justify-center whitespace-nowrap active:scale-95 cursor-pointer"
+                    >
+                      {isBeingClaimed ? (
+                        <div className="w-2.5 h-2.5 border-2 border-black border-t-transparent rounded-full animate-spin" />
+                      ) : (
+                        <span>CHOOSE BOX</span>
+                      )}
+                    </button>
+                  ) : (
+                    <div className="w-full py-1 px-1 rounded bg-neutral-900 border border-neutral-800 text-neutral-400 font-cinzel font-semibold text-[8px] sm:text-[9px] uppercase tracking-wider flex items-center justify-center select-none">
+                      <span>OPENED</span>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
           </div>
         </div>
       )}

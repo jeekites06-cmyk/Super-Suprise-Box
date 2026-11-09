@@ -792,7 +792,8 @@ app.get('/api/batch/info', (_req: Request, res: Response) => {
 // - Hidden boxes (isHidden === true) are strictly excluded from public display.
 const handleGetPublicBoxes = (req: Request, res: Response): void => {
   const page = Math.max(1, parseInt((req.query.page as string) || '1', 10));
-  const limit = Math.min(350, Math.max(12, parseInt((req.query.limit as string) || '300', 10)));
+  const rawLimit = req.query.limit ? parseInt(req.query.limit as string, 10) : undefined;
+  const limit = rawLimit ? Math.max(1, Math.min(25000, rawLimit)) : 25000;
   const search = ((req.query.search as string) || '').trim().toUpperCase();
   const rangeStart = req.query.rangeStart ? parseInt(req.query.rangeStart as string, 10) : undefined;
   const rangeEnd = req.query.rangeEnd ? parseInt(req.query.rangeEnd as string, 10) : undefined;
